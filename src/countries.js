@@ -2,6 +2,7 @@
 // ("Bangladeshi", "British"). Destination countries map to the cities we cover.
 
 import { PLACES, worldCitiesIn, WORLD_COUNTRIES } from './places.js';
+import { COUNTRY_EN } from './country-names.js';
 
 // Destination countries: name + extra spellings. Cities come from PLACES.
 const DEST_NAMES = {
@@ -46,7 +47,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const ALL_NAMES = { ...DEST_NAMES };
 for (const cc of WORLD_COUNTRIES) {
   if (ALL_NAMES[cc]) continue;
-  const n = regionName(cc);
+  const n = COUNTRY_EN[cc]; // precomputed: no Intl work at start-up
   if (n && n !== cc && !/[()]/.test(n)) ALL_NAMES[cc] = [n];
 }
 Object.assign(ALL_NAMES, { CZ: [...ALL_NAMES.CZ], KG: ['Kyrgyzstan', 'Kyrgyz Republic', 'Kirghizia'], CI: ['Ivory Coast', "Côte d'Ivoire"], MM: ALL_NAMES.MM });
@@ -76,6 +77,7 @@ export function findCountries(text) {
 // ---------- passports ----------
 var displayNames = null; // var: used while this file is still loading
 export function regionName(cc) {
+  if (COUNTRY_EN[cc]) return COUNTRY_EN[cc];
   try {
     displayNames ??= new Intl.DisplayNames(['en'], { type: 'region' });
     return displayNames.of(cc);

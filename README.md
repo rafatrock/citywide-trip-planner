@@ -1,10 +1,16 @@
-# CityWide Trip Planner — Telegram bot (version 4.9)
+# CityWide Trip Planner — Telegram bot (version 4.9.1)
 
 Travellers chat with **Maya**, a friendly AI travel assistant (she always says she's an AI if asked). They type a trip in one line; Maya replies with three picks for their group: ⭐ best overall, 💰 cheapest and 🛋️ most comfortable, plus weather and visa notes for their passport, and can watch prices.
 
 Runs free on Cloudflare (Workers, D1, Workers AI) and earns through your Travelpayouts account.
 
 **Setup:** follow the step-by-step **CityWide Trip Planner — Setup Guide** doc. No commands, nothing to install: only Telegram, GitHub's website and the Cloudflare dashboard.
+
+## What's new in version 4.9.1
+
+- **Faster start-up:** country and language names are no longer worked out each time a fresh copy of the Worker starts (start-up work roughly halved).
+- **Command menu refreshes itself daily**, so new commands like /deals appear without opening the setup link.
+- **Smart Placement** (`[placement] mode = "smart"` in wrangler.toml): Cloudflare can run the Worker next to the database instead of next to Telegram's servers, which cuts the waiting on every database call.
 
 ## What's new in version 4.9 (more of the free Aviasales Data API)
 
@@ -146,5 +152,6 @@ Runs free on Cloudflare (Workers, D1, Workers AI) and earns through your Travelp
 | `src/profile.js` | Traveller profiles, segments, `/user` |
 | `src/live.js` | Live Google Flights prices (SerpApi) |
 | `src/db.js` | Database tables (created and upgraded automatically) |
-| `tools/build-visa-data.mjs`, `tools/build-world-data.mjs` | Rebuild the visa and airport tables (developer only) |
+| `tools/build-visa-data.mjs`, `tools/build-world-data.mjs`, `tools/build-country-names.mjs` | Rebuild the visa, airport and country-name tables (developer only) |
+| `src/country-names.js` | English country names (generated) |
 | `test/` | Automated tests (developer only) |

@@ -13,8 +13,8 @@ import { counter } from './db.js';
 
 const DAY = 86400;
 const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '–');
-const LANG = new Intl.DisplayNames(['en'], { type: 'language' });
-const langName = (c) => { try { return LANG.of(c) || c; } catch { return c; } };
+let LANG = null; // created only when /analytics runs (it is slow to build)
+const langName = (c) => { try { LANG ??= new Intl.DisplayNames(['en'], { type: 'language' }); return LANG.of(c) || c; } catch { return c; } };
 
 export async function analytics(env, now = Math.floor(Date.now() / 1000)) {
   const one = (sql, ...b) => env.DB.prepare(sql).bind(...b).first();

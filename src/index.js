@@ -56,22 +56,7 @@ async function setup(env, request) {
     if (hook.ok) break;
     await new Promise((r) => setTimeout(r, 2000));
   }
-  await tg(env, 'setMyCommands', {
-    commands: [
-      { command: 'plan', description: 'Plan a new trip' },
-      { command: 'deals', description: 'Cheap fares from your city' },
-      { command: 'latest', description: 'Updates picked for you' },
-      { command: 'watches', description: 'Your price watches' },
-      { command: 'trips', description: 'Your booked trips' },
-      { command: 'currency', description: 'Change currency' },
-      { command: 'visas', description: 'Visas you told me about' },
-      { command: 'profile', description: 'What I remember about you' },
-      { command: 'settings', description: 'Home city and preferences' },
-      { command: 'help', description: 'How to use the bot' },
-      { command: 'privacy', description: 'What I store' },
-      { command: 'delete', description: 'Delete my data' },
-    ],
-  });
+  await tg(env, 'setMyCommands', { commands: COMMANDS });
   await tg(env, 'setMyDescription', { description: 'Tell me who is travelling and where. I find the best flights for your group, explain why, and watch prices for you.' });
   await tg(env, 'setMyShortDescription', { short_description: 'Flights picked for your group: family, friends, solo, business. Free price alerts.' });
   const info = await tg(env, 'getWebhookInfo', {});
@@ -108,6 +93,23 @@ async function refreshAirlines(env) {
     }
   } catch (e) { console.log('airline list failed', e && e.message); }
 }
+
+// The bot's command menu in Telegram. Sent at setup and refreshed by the daily job,
+// so new commands (like /deals) appear without opening the setup link again.
+const COMMANDS = [
+      { command: 'plan', description: 'Plan a new trip' },
+      { command: 'deals', description: 'Cheap fares from your city' },
+      { command: 'latest', description: 'Updates picked for you' },
+      { command: 'watches', description: 'Your price watches' },
+      { command: 'trips', description: 'Your booked trips' },
+      { command: 'currency', description: 'Change currency' },
+      { command: 'visas', description: 'Visas you told me about' },
+      { command: 'profile', description: 'What I remember about you' },
+      { command: 'settings', description: 'Home city and preferences' },
+      { command: 'help', description: 'How to use the bot' },
+      { command: 'privacy', description: 'What I store' },
+      { command: 'delete', description: 'Delete my data' },
+    ];
 
 // Each message or cron run gets its own copy of env with a call budget (free plan: 50).
 const withBudget = (env, max = 50) => Object.assign(Object.create(env), { __sub: { used: 0, max } });
@@ -204,6 +206,7 @@ export default {
           await askBooked(env);
           await cleanup(env);
           await refreshAirlines(env);
+          await tg(env, 'setMyCommands', { commands: COMMANDS });
         } else {
           await checkWatches(env);
           await weeklyDigest(env);
