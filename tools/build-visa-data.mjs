@@ -2,10 +2,9 @@
 // github.com/ilyankou/passport-index-dataset, last updated 12 Jan 2025).
 // Usage (developer only): node tools/build-visa-data.mjs <path to passport-index-tidy-iso2.csv>
 import { readFileSync, writeFileSync } from 'node:fs';
-import { PLACES } from '../src/places.js';
 
 const csv = readFileSync(process.argv[2], 'utf8').trim().split('\n').slice(1);
-const DEST = [...new Set(PLACES.map((p) => p.cc))].sort();
+const DEST = [...new Set(csv.map((l) => l.split(',')[1]))].filter((d) => /^[A-Z]{2}$/.test(d)).sort();
 const code = (req) => {
   if (req === '-1') return 'H';                 // own country
   if (/^\d+$/.test(req) || req === 'visa free') return 'F';

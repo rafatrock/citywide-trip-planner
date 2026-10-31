@@ -18,6 +18,13 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, expires_at INTEGER)`,
   `CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)`,
   `CREATE TABLE IF NOT EXISTS prices (route TEXT, month TEXT, price REAL, currency TEXT, seen_at INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS user_visas (user_id INTEGER, cc TEXT, status TEXT, at INTEGER, PRIMARY KEY (user_id, cc))`,
+  `CREATE TABLE IF NOT EXISTS misses (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, text TEXT, at INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS interests (user_id INTEGER, dest TEXT, origin TEXT, month TEXT, n INTEGER DEFAULT 0, last_at INTEGER,
+    PRIMARY KEY (user_id, dest))`,
+  `CREATE TABLE IF NOT EXISTS trips (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, chat_id INTEGER, origin TEXT, destination TEXT,
+    depart TEXT, ret TEXT, created_at INTEGER, r14 INTEGER DEFAULT 0, r3 INTEGER DEFAULT 0, r1 INTEGER DEFAULT 0, active INTEGER DEFAULT 1)`,
+  `CREATE TABLE IF NOT EXISTS news (id INTEGER PRIMARY KEY AUTOINCREMENT, tags TEXT, text TEXT, created_at INTEGER, expires_at INTEGER)`,
   `CREATE INDEX IF NOT EXISTS idx_watches_due ON watches (active, last_checked)`,
   `CREATE INDEX IF NOT EXISTS idx_prices_route ON prices (route, month, currency)`,
 ];
@@ -36,13 +43,32 @@ export async function ensureSchema(env) {
   for (const col of V2_COLUMNS) {
     try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN ${col}`).run(); } catch { /* already there */ }
   }
-  try { await env.DB.prepare('ALTER TABLE usage ADD COLUMN emails INTEGER DEFAULT 0').run(); } catch { /* already there */ }
+  const V3 = ['usage ADD COLUMN emails INTEGER DEFAULT 0', 'usage ADD COLUMN latest INTEGER DEFAULT 0',
+    'users ADD COLUMN lang TEXT', 'users ADD COLUMN digest_at INTEGER DEFAULT 0',
+    'news ADD COLUMN url TEXT', 'news ADD COLUMN source TEXT', 'news ADD COLUMN ext_id TEXT',
+    'links ADD COLUMN meta TEXT', 'links ADD COLUMN first_click INTEGER', 'links ADD COLUMN asked INTEGER DEFAULT 0',
+    // v4.2: Telegram app language (for analytics and the multilingual version)
+    'users ADD COLUMN tg_lang TEXT'];
+  for (const a of V3) {
+    try { await env.DB.prepare(`ALTER TABLE ${a}`).run(); } catch { /* already there */ }
+  }
   await env.DB.batch([
     env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (email) WHERE email IS NOT NULL'),
     env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users (phone) WHERE phone IS NOT NULL'),
   ]);
   ready.add(env.DB);
 }
+
+// Free plan: max 50 outgoing calls (fetch) per message or cron run. Each run gets
+// a budget (set in index.js); data lookups stop early and leave room for replies.
+export function canFetch(env, n = 1, reserve = 6) {
+  const b = env.__sub;
+  if (!b) return true;
+  if (b.used + n > b.max - reserve) return false;
+  b.used += n;
+  return true;
+}
+export function countFetch(env, n = 1) { if (env.__sub) env.__sub.used += n; }
 
 export const today = () => new Date().toISOString().slice(0, 10);
 export const nowSec = () => Math.floor(Date.now() / 1000);
@@ -63,20 +89,25 @@ export async function touchUser(env, from, chatId) {
   const day = today();
   const existing = await getUser(env, from.id);
   if (!existing) {
-    await env.DB.prepare(`INSERT INTO users (id, chat_id, first_name, username, setup_step, created_at, last_seen, active_days, last_day)
-      VALUES (?, ?, ?, ?, 'home', ?, ?, 1, ?)`)
-      .bind(from.id, chatId, (from.first_name || '').slice(0, 64), (from.username || '').slice(0, 64), t, t, day).run();
+    await env.DB.prepare(`INSERT INTO users (id, chat_id, first_name, username, setup_step, created_at, last_seen, active_days, last_day, tg_lang)
+      VALUES (?, ?, ?, ?, 'home', ?, ?, 1, ?, ?)`)
+      .bind(from.id, chatId, (from.first_name || '').slice(0, 64), (from.username || '').slice(0, 64), t, t, day,
+        String(from.language_code || '').slice(0, 8) || null).run();
     await bump(env, 'new_users');
+    await bump(env, 'active_users');
     return getUser(env, from.id);
   }
   const newDay = existing.last_day !== day;
-  await env.DB.prepare(`UPDATE users SET last_seen = ?, chat_id = COALESCE(chat_id, ?), last_day = ?,
-    active_days = active_days + ? WHERE id = ?`).bind(t, chatId, day, newDay ? 1 : 0, from.id).run();
+  // Saves database writes: only record activity once every 10 minutes (or on a new day).
+  if (newDay || t - (existing.last_seen || 0) > 600 || (chatId && !existing.chat_id)) {
+    await env.DB.prepare(`UPDATE users SET last_seen = ?, chat_id = COALESCE(chat_id, ?), last_day = ?,
+      active_days = active_days + ? WHERE id = ?`).bind(t, chatId, day, newDay ? 1 : 0, from.id).run();
+  }
   if (newDay) await bump(env, 'active_users');
   return { ...existing, last_seen: t, last_day: day, active_days: existing.active_days + (newDay ? 1 : 0) };
 }
 
-const USER_FIELDS = new Set(['home', 'country', 'currency', 'persona', 'pay', 'setup_step', 'draft', 'banned', 'chat_id',
+const USER_FIELDS = new Set(['lang', 'digest_at', 'home', 'country', 'currency', 'persona', 'pay', 'setup_step', 'draft', 'banned', 'chat_id',
   'name', 'email', 'email_verified', 'email_code', 'email_code_exp', 'email_tries', 'phone', 'phone_source', 'phone_asked',
   'passports', 'visas', 'visas_asked', 'marketing', 'consent_at']);
 
@@ -105,11 +136,11 @@ export async function deleteUserData(env, id) {
 // ---------- per-user daily usage ----------
 export async function getUsage(env, key) {
   const row = await env.DB.prepare('SELECT * FROM usage WHERE key = ? AND day = ?').bind(key, today()).first();
-  return row || { searches: 0, watches: 0, ai: 0, bonus: 0, warned: 0, emails: 0 };
+  return row || { searches: 0, watches: 0, ai: 0, bonus: 0, warned: 0, emails: 0, latest: 0 };
 }
 
 export async function addUsage(env, key, field, n = 1) {
-  if (!['searches', 'watches', 'ai', 'bonus', 'warned', 'emails'].includes(field)) return;
+  if (!['searches', 'watches', 'ai', 'bonus', 'warned', 'emails', 'latest'].includes(field)) return;
   await env.DB.prepare(`INSERT INTO usage (key, day, ${field}) VALUES (?, ?, ?)
     ON CONFLICT (key, day) DO UPDATE SET ${field} = ${field} + excluded.${field}`).bind(key, today(), n).run();
 }
@@ -168,17 +199,17 @@ export async function getSearch(env, id) {
 }
 
 // ---------- tracked booking links ----------
-export async function saveLink(env, url, userId, kind) {
+export async function saveLink(env, url, userId, kind, meta = null) {
   const id = randomId(9);
-  await env.DB.prepare('INSERT INTO links (id, url, user_id, kind, created_at) VALUES (?, ?, ?, ?, ?)')
-    .bind(id, url, userId, kind, nowSec()).run();
+  await env.DB.prepare('INSERT INTO links (id, url, user_id, kind, created_at, meta) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(id, url, userId, kind, nowSec(), meta ? JSON.stringify(meta) : null).run();
   return id;
 }
 
 export async function useLink(env, id) {
   const row = await env.DB.prepare('SELECT url, kind FROM links WHERE id = ?').bind(id).first();
   if (!row) return null;
-  await env.DB.prepare('UPDATE links SET clicks = clicks + 1 WHERE id = ?').bind(id).run();
+  await env.DB.prepare('UPDATE links SET clicks = clicks + 1, first_click = COALESCE(first_click, ?) WHERE id = ?').bind(nowSec(), id).run();
   return row;
 }
 
@@ -204,5 +235,9 @@ export async function cleanup(env) {
     env.DB.prepare('DELETE FROM prices WHERE seen_at < ?').bind(t - 120 * 86400),
     env.DB.prepare('DELETE FROM usage WHERE day < ?').bind(new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10)),
     env.DB.prepare('UPDATE watches SET active = 0 WHERE active = 1 AND expires_at < ?').bind(t),
+    env.DB.prepare('DELETE FROM misses WHERE at < ?').bind(t - 30 * 86400),
+    env.DB.prepare('DELETE FROM news WHERE expires_at < ?').bind(t),
+    env.DB.prepare("DELETE FROM counters WHERE name LIKE 'em_u%' AND day < ?").bind(`month:${new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 7)}`),
+    env.DB.prepare('UPDATE trips SET active = 0 WHERE active = 1 AND COALESCE(ret, depart) < ?').bind(new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10)),
   ]);
 }

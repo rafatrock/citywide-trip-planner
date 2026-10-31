@@ -1,6 +1,6 @@
 // One-time profile questions, asked once and remembered:
 // name → home city → passport(s) → visas held → email (+code) → WhatsApp (optional)
-// → email offers consent → payment method (Bangladesh) → usual travel group.
+// → email offers consent → usual travel group. (Same for every country.)
 
 import { updateUser, ownerOf, getUsage, addUsage, bump, nowSec } from './db.js';
 import { send, edit, btn, rows, esc, tg } from './tg.js';
@@ -28,14 +28,13 @@ export function nextStep(env, u) {
   if (!u.email && requireEmail(env)) return 'email';
   if (!u.phone_asked) return 'phone';
   if (!u.consent_at) return 'consent';
-  if (u.country === 'BD' && !u.pay) return 'pay';
   if (!u.persona) return 'persona';
   return 'done';
 }
 
 const ORDER = ['name', 'home', 'passport', 'visas', 'email', 'phone', 'consent', 'persona'];
 const progress = (step) => {
-  const i = ORDER.indexOf(step === 'email_code' ? 'email' : step === 'pay' ? 'persona' : step);
+  const i = ORDER.indexOf(step === 'email_code' ? 'email' : step);
   return i >= 0 ? `<i>Step ${i + 1} of ${ORDER.length}</i>\n` : '';
 };
 
@@ -191,7 +190,7 @@ async function sendCode(env, u, chatId, email) {
   if ((usage.emails || 0) >= 3) return send(env, chatId, "I've sent 3 codes today. Please try again tomorrow, or tap Change email.");
   const code = sixDigitCode();
   const msg = codeEmail(env, u.name || 'there', code);
-  const r = await sendEmail(env, email, msg.subject, msg.html, msg.text);
+  const r = await sendEmail(env, email, msg.subject, msg.html, msg.text, { kind: 'code' });
   await addUsage(env, key, 'emails');
   if (!r.ok) {
     // email service down or at its daily cap: accept the address unverified rather than block the user

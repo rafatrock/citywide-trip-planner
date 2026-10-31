@@ -1,6 +1,9 @@
 // Thin wrapper around the Telegram Bot API (free; no SDK needed).
 
+import { countFetch } from './db.js';
+
 export async function tg(env, method, body) {
+  countFetch(env);
   const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

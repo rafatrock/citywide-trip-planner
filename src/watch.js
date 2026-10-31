@@ -90,6 +90,11 @@ export async function checkWatches(env) {
     const cur = res.currency;
     await recordPrice(env, `${draft.origin}-${draft.destination}`, draft.depart.value.slice(0, 7), price, cur);
     const sameCur = !w.currency || w.currency === cur;
+    if (!sameCur) {
+      // traveller switched currency (/currency): restart the comparison in the new currency, no alert
+      await env.DB.prepare('UPDATE watches SET best_price = ?, last_alert_price = ?, currency = ? WHERE id = ?').bind(price, price, cur, w.id).run();
+      continue;
+    }
     const dropped = sameCur && w.last_alert_price && price <= w.last_alert_price * (1 - DROP);
     const pax = (draft.adults || 1) + (draft.children || 0);
     const perPersonBudget = draft.budget && draft.budget.currency === cur ? (draft.budget.perPerson ? draft.budget.amount : draft.budget.amount / pax) : null;

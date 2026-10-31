@@ -4,33 +4,34 @@
 
 import {
   touchUser, updateUser, deleteUserData, getUsage, addUsage, bump, saveSearch, getSearch,
-  saveLink, recordPrice, priceStats, getConfig, nowSec,
+  saveLink, recordPrice, priceStats, getConfig, nowSec, counter, cacheGet, cacheSet,
 } from './db.js';
 import { send, answer, typing, btn, url, rows, esc } from './tg.js';
 import { parseTrip, missingField, addDays } from './parse.js';
 import { aiParse } from './ai.js';
 import { placeByCode, resolvePlace, POPULAR_FROM, PLACES } from './places.js';
 import { citiesIn, countryName } from './countries.js';
-import { searchFares, bookingUrl, liveSearchUrl, partnerLink } from './tp.js';
-import { rankFares, cheapestDates, PERSONAS } from './rank.js';
+import { searchFares, bookingUrl, liveSearchUrl } from './tp.js';
+import { rankFares, cheapestDates, PERSONAS, localParts, arrivalLocal } from './rank.js';
 import { handleAdmin, isAdmin } from './admin.js';
 import { createWatch, listWatches, stopWatch } from './watch.js';
 import { nextStep, askStep, onSetupText, onSetupCallback, onContact, profileText, assistant } from './onboarding.js';
-import { visaFor, visaLine, isEasy, needsEmbassy } from './visa.js';
+import { visaFor, visaLine, isEasy, needsEmbassy, shouldAskVisa, countryVisaMap, yesCountries, setCountryVisa, OFFICIAL_EVISA, VISA_TIPS } from './visa.js';
+import { toolkit, toolkitContext, storeFor, gearPicks, gearUrl } from './toolkit.js';
+import { latestNewsFor, newsLine } from './news.js';
+import { noteInterest, onBookedAnswer, listTrips, removeTrip, latest } from './retention.js';
+import { money as fmtMoney } from './format.js';
+import { multiSummary, multiKeyboard, runMulti, orderStops, stopsText } from './multi.js';
 import { weatherLine, climate, describe, pleasantScore } from './weather.js';
-import { sendEmail, planEmail } from './email.js';
+import { sendEmail, planEmail, unsubSig, emailReady, emailRoom, monthKey } from './email.js';
 
 const MAX_TEXT = 300;
+// Currencies the price data supports well; travellers pick with /currency.
+const CURRENCIES = ['usd', 'eur', 'gbp', 'bdt', 'inr', 'pkr', 'aed', 'sar', 'myr', 'sgd', 'thb', 'idr', 'aud', 'cad', 'nzd', 'rub', 'brl', 'egp', 'try', 'jpy'];
 const list = (s) => String(s || '').split(',').map((x) => x.trim()).filter(Boolean);
 
 // ---------------- helpers ----------------
-export const money = (amount, cur) => {
-  try {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: cur.toUpperCase(), maximumFractionDigits: 0 }).format(amount);
-  } catch {
-    return `${Math.round(amount).toLocaleString('en-US')} ${cur.toUpperCase()}`;
-  }
-};
+export const money = fmtMoney;
 
 const AIRLINES = {
   BG: 'Biman', BS: 'US-Bangla', '2A': 'Air Astra', EK: 'Emirates', QR: 'Qatar Airways', EY: 'Etihad', FZ: 'flydubai',
@@ -43,6 +44,10 @@ const AIRLINES = {
   FR: 'Ryanair', U2: 'easyJet', W6: 'Wizz Air', VY: 'Vueling', IB: 'Iberia', TP: 'TAP', AZ: 'ITA',
   AA: 'American', DL: 'Delta', UA: 'United', B6: 'JetBlue', WN: 'Southwest', NK: 'Spirit', AC: 'Air Canada',
   WS: 'WestJet', QF: 'Qantas', VA: 'Virgin Australia', JQ: 'Jetstar', NZ: 'Air New Zealand', PK: 'PIA',
+  HY: 'Uzbekistan Airways', KC: 'Air Astana', DV: 'SCAT', T5: 'Turkmenistan Airlines', QH: 'Air Kyrgyzstan', J2: 'AZAL',
+  A9: 'Georgian Airways', SZ: 'Somon Air', '5W': 'Wizz Air Abu Dhabi', XY: 'flynas', F3: 'flyadeal', MS: 'EgyptAir', RJ: 'Royal Jordanian',
+  J9: 'Jazeera Airways', GF: 'Gulf Air', KU: 'Kuwait Airways', OV: 'SalamAir', PC: 'Pegasus', XQ: 'SunExpress',
+  SU: 'Aeroflot', S7: 'S7 Airlines', ET: 'Ethiopian', KQ: 'Kenya Airways', '3K': 'Jetstar Asia', VZ: 'Thai Vietjet', DD: 'Nok Air', SL: 'Thai Lion Air',
 };
 const airline = (c) => AIRLINES[c] || c || 'Airline';
 const LABEL_ICON = { 'Best overall': '⭐', Cheapest: '💰', 'Most comfortable': '🛋️', 'Also good': '👍' };
@@ -52,7 +57,7 @@ const fmtDay = (iso) => new Date(`${iso.slice(0, 10)}T12:00:00Z`).toLocaleDateSt
 const fmtMonth = (ym) => new Date(`${ym}-15T12:00:00Z`).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 const hhmm = (p) => `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
 const placeName = (code) => placeByCode(code)?.name || code;
-const firstName = (u) => (u?.name ? esc(u.name) : 'there');
+const firstName = (u) => (u?.name || u?.first_name ? esc(u.name || u.first_name) : 'there');
 
 function nextMonths(n = 4) {
   const out = [];
@@ -69,11 +74,11 @@ async function publicUrl(env) {
   return (await getConfig(env, 'public_url')) || '';
 }
 
-export async function trackedLink(env, href, userId, kind) {
+export async function trackedLink(env, href, userId, kind, meta = null) {
   if (!href) return null;
   const base = await publicUrl(env);
   if (!base) return href;
-  const id = await saveLink(env, href, userId, kind);
+  const id = await saveLink(env, href, userId, kind, meta);
   return `${base}/go/${id}`;
 }
 
@@ -183,6 +188,25 @@ async function onCommand(env, user, chat, text, isGroup) {
       return send(env, chat.id, `Sure, ${firstName(user)}! Tell me your trip in one line, e.g.\n<i>"Family of 4, 2 kids, London to Bali in July, under £3,000 total"</i>`);
     case '/watches':
       return listWatches(env, user, chat.id);
+    case '/latest':
+      return latest(env, user, chat.id);
+    case '/trips':
+      return listTrips(env, user, chat.id);
+    case '/currency':
+      return send(env, chat.id, `Prices are shown in <b>${String(user.currency || 'usd').toUpperCase()}</b>. Pick another:`, rows(CURRENCIES.map((c) => btn(c.toUpperCase(), `cur:${c}`)), 4));
+    case '/visas': {
+      const vmap = await countryVisaMap(env, user.id);
+      const keys = Object.keys(vmap);
+      if (!keys.length) return send(env, chat.id, 'You haven’t told me about any country visas yet. I’ll ask when a trip needs one.');
+      return send(env, chat.id, `<b>Visas you told me about</b>\n${keys.map((cc) => `• ${esc(countryName(cc))}: ${vmap[cc] === 'yes' ? 'have a valid visa' : 'no visa yet'}`).join('\n')}`,
+        keys.map((cc) => [btn(`Forget ${countryName(cc)}`, `uv:del:${cc}`)]));
+    }
+    case '/gear': {
+      const store = storeFor(env, user.country);
+      const base = await publicUrl(env);
+      if (!store || !base) return send(env, chat.id, 'My travel-essentials list is coming soon! 🎒');
+      return send(env, chat.id, '🎒 My packing essentials: chargers, adapters, packing cubes and more.', [[url('Open the checklist', `${base}/gear?c=${user.country || 'US'}`)]]);
+    }
     case '/profile':
       return send(env, chat.id, profileText(env, user));
     case '/settings':
@@ -215,7 +239,7 @@ Type your trip in one line, the way you'd tell a friend:
 
 I give you three picks: ⭐ best overall, 💰 cheapest and 🛋️ most comfortable, with visa and weather notes, and I can watch prices for you.
 
-/plan new trip · /watches price watches · /profile what I remember · /settings change details · /privacy · /delete`;
+/plan new trip · /latest updates for you · /watches price watches · /trips booked trips · /currency · /visas · /profile · /settings · /privacy · /delete`;
 
 // ---------------- trip flow ----------------
 function quotaKey(user, chat, isGroup) { return isGroup ? `g${chat.id}` : `u${user.id}`; }
@@ -225,9 +249,23 @@ async function onTripText(env, user, chat, text, isGroup) {
   const prev = !isGroup && user.draft ? JSON.parse(user.draft) : null;
 
   if (prev && prev.awaiting) {
+    const again = parseTrip(text, { now, home: user.home, currency: user.currency || 'usd' });
+    if (prev.awaiting === 'destination' && (again.multi || again.destCountry)) {
+      // "Uzbekistan, Kyrgyzstan and Turkmenistan" / "Thailand" as the answer: keep the rest of the trip
+      const merged = { ...prev, ...again, origin: prev.origin || again.origin };
+      for (const k of ['depart', 'ret', 'nights', 'stay', 'flex', 'adults', 'children', 'persona', 'budget']) if (prev[k] !== undefined && again[k] === undefined) merged[k] = prev[k];
+      delete merged.awaiting;
+      return continueDraft(env, user, chat, merged, isGroup);
+    }
     const place = resolvePlace(text);
-    if (prev.awaiting === 'destination' && place) { prev.destination = place.code; delete prev.awaiting; delete prev.destCountry; return continueDraft(env, user, chat, prev, isGroup); }
+    if (prev.awaiting === 'destination' && place) { prev.destination = place.code; delete prev.awaiting; delete prev.destCountry; if (place.guessed) prev.guessed = place.guessed; return continueDraft(env, user, chat, prev, isGroup); }
     if (prev.awaiting === 'origin' && place) { prev.origin = place.code; delete prev.awaiting; return continueDraft(env, user, chat, prev, isGroup); }
+    if (!again.destination && text.split(/\s+/).length <= 4) {
+      // never ask the same question twice: say what went wrong instead
+      await env.DB.prepare('INSERT INTO misses (user_id, text, at) VALUES (?, ?, ?)').bind(user.id, text.slice(0, 200), nowSec()).run();
+      await bump(env, 'parse_misses');
+      return send(env, chat.id, `Sorry ${firstName(user)}, I couldn't find "${esc(text.slice(0, 40))}" 🙈 Try the nearest big city, the country name, or the airport's 3-letter code (e.g. TAS for Tashkent).`);
+    }
   }
 
   let draft = parseTrip(text, { now, home: user.home, currency: user.currency || 'usd' });
@@ -239,8 +277,22 @@ async function onTripText(env, user, chat, text, isGroup) {
       if (ai) draft = { ...ai, ...draft, destination: draft.destination || ai.destination, origin: draft.origin || ai.origin || user.home };
     }
   }
+  if (!draft.destination && !draft.destCountry && text.split(/\s+/).length >= 3) {
+    await env.DB.prepare('INSERT INTO misses (user_id, text, at) VALUES (?, ?, ?)').bind(user.id, text.slice(0, 200), nowSec()).run();
+    await bump(env, 'parse_misses');
+  }
   if (!draft.persona && user.persona) draft.persona = user.persona;
+  if (!draft.adults && !draft.children) {
+    // not said: make a sensible guess for the group and let them correct it with one tap
+    const guess = { family: [2, 1], friends: [3, 0], women: [3, 0], couple: [2, 0] }[draft.persona];
+    if (guess) { [draft.adults, draft.children] = guess; draft.paxGuess = draft.persona !== 'couple'; } else draft.adults = 1;
+  }
   if (!draft.adults) draft.adults = draft.persona === 'couple' ? 2 : 1;
+  if (draft.multi && !draft.reorderedChecked) {
+    const o = orderStops(draft.origin, draft.multi);
+    draft.multi = o.stops; draft.reordered = o.reordered; draft.reorderedChecked = true;
+    draft.destination = draft.multi[0];
+  }
   if (draft.budget && !draft.budget.currency) draft.budget.currency = user.currency || 'usd';
   if (draft.depart && !draft.flex) draft.flex = draft.depart.type === 'month' ? 'month' : 'exact';
   return continueDraft(env, user, chat, draft, isGroup);
@@ -277,12 +329,38 @@ async function continueDraft(env, user, chat, draft, isGroup) {
     return send(env, chat.id, 'When would you like to go?', rows(nextMonths(4).map((m) => btn(fmtMonth(m), `d:m:${m}`)), 2));
   }
   await saveDraft(env, user, draft, isGroup);
+  if (draft.multi) {
+    if (isGroup) return startMulti(env, user, chat, draft, isGroup);
+    const vm = await countryVisaMap(env, user.id);
+    const kb = multiKeyboard(draft);
+    if (draft.paxGuess) kb.splice(1, 0, ...paxRows(draft));
+    return send(env, chat.id, multiSummary(user, draft, vm, firstName(user)) + (draft.paxGuess ? '\n\n👥 How many are going? (my guess is above; tap to change)' : ''), kb);
+  }
   if (isGroup) return runSearch(env, user, chat, draft, isGroup);
-  return send(env, chat.id, summary(env, user, draft), confirmKeyboard(draft));
+  const vmap = await countryVisaMap(env, user.id);
+  const destCc = placeByCode(draft.destination)?.cc;
+  const askVisa = shouldAskVisa(list(user.passports), list(user.visas), destCc, vmap) ? destCc : null;
+  return send(env, chat.id, summary(env, user, draft, vmap, askVisa), confirmKeyboard(draft, askVisa));
 }
 
-function confirmKeyboard(d) {
+const STAYS = { short: [2, 4, '2–4 nights'], week: [5, 7, '5–7 nights'], long: [8, 14, '8–14 nights'] };
+
+function paxRows(d) {
+  // 👤 = adults, 🧒 = children; ✅ marks the current choice
+  const rowsOut = [[1, 2, 3, 4, 5, 6].map((n) => btn(`${d.adults === n ? '✅' : '👤'}${n}`, `d:ad:${n}`))];
+  if (d.persona === 'family' || d.children) rowsOut.push([0, 1, 2, 3, 4].map((n) => btn(`${(d.children || 0) === n ? '✅' : '🧒'}${n}`, `d:ch:${n}`)));
+  return rowsOut;
+}
+
+function confirmKeyboard(d, askVisa) {
   const kb = [[btn('✅ Search', 'd:go')]];
+  if (d.paxGuess) kb.push(...paxRows(d));
+  if (askVisa) kb.push([btn(`✅ I have a ${countryName(askVisa)} visa`, `d:visa:yes:${askVisa}`), btn('No visa yet', `d:visa:no:${askVisa}`)]);
+  kb.push([btn(`${d.oneWay ? '' : '✅ '}⇄ Return`, 'd:way:rt'), btn(`${d.oneWay ? '✅ ' : ''}→ One way`, 'd:way:ow')]);
+  if (!d.oneWay && !d.ret && (d.depart.type === 'month' || d.flex === 'month')) {
+    const mark = (k) => ((d.stay || 'any') === k ? '✅ ' : '');
+    kb.push([...Object.entries(STAYS).map(([k, v]) => btn(`${mark(k)}${v[2]}`, `d:stay:${k}`)), btn(`${mark('any')}Any`, 'd:stay:any')]);
+  }
   if (d.depart.type === 'date') {
     const mark = (f) => (d.flex === f ? '✅ ' : '');
     kb.push([btn(`${mark('exact')}Exact dates`, 'd:flex:exact'), btn(`${mark('3d')}± 3 days`, 'd:flex:3d'), btn(`${mark('month')}Any day that month`, 'd:flex:month')]);
@@ -291,28 +369,38 @@ function confirmKeyboard(d) {
   return kb;
 }
 
-function summary(env, user, d) {
+function summary(env, user, d, vmap = {}, askVisa = null) {
   const pax = (d.adults || 1) + (d.children || 0);
   const who = d.persona ? PERSONAS[d.persona].label : (pax === 1 ? 'Solo' : `${pax} travellers`);
   const people = d.children ? `${d.adults} adults, ${d.children} children` : `${pax} ${pax === 1 ? 'person' : 'people'}`;
   let when;
-  if (d.depart.type === 'month' || d.flex === 'month') when = `${fmtMonth(d.depart.value.slice(0, 7))} (any days)`;
-  else {
-    when = `${fmtDay(d.depart.value)}${d.ret ? ` → ${fmtDay(d.ret.value)}` : ''}`;
+  if (d.depart.type === 'month' || d.flex === 'month') {
+    when = `${fmtMonth(d.depart.value.slice(0, 7))} (any days)`;
+    if (!d.oneWay && !d.ret) when += STAYS[d.stay] ? `, staying ${STAYS[d.stay][2]}` : ', any trip length';
+  } else {
+    when = `${fmtDay(d.depart.value)}${d.ret && !d.oneWay ? ` → back ${fmtDay(d.ret.value)}` : ''}`;
     when += d.flex === '3d' ? ' (± 3 days)' : ' (exact)';
   }
+  const arrow = d.oneWay ? '→' : '⇄';
   const lines = [
     `Got it, ${firstName(user)}! Here's what I understood:`,
-    `✈️ ${esc(placeName(d.origin))} (${d.origin}) → ${esc(placeName(d.destination))} (${d.destination})${d.oneWay ? ', one way' : ''}`,
-    `📅 ${when}${d.nights && d.depart.type === 'month' ? `, about ${d.nights} nights` : ''}`,
-    `👥 ${who} · ${people}`,
+    `✈️ ${esc(placeName(d.origin))} (${d.origin}) ${arrow} ${esc(placeName(d.destination))} (${d.destination}) · <b>${d.oneWay ? 'one way' : 'return trip'}</b>`,
+    `📅 ${when}`,
+    `👥 ${who} · ${people}${d.paxGuess ? ' <i>(my guess, tap below to change)</i>' : ''}`,
   ];
+  if (d.guessed) lines.push(`<i>(I read "${esc(d.guessed)}" as ${esc(placeName(d.destination) || countryName(d.destCountry))}. Not right? Just type the place again.)</i>`);
   if (d.budget) lines.push(`💰 Budget ${money(d.budget.amount, d.budget.currency || 'usd')} ${d.budget.perPerson ? 'per person' : 'in total'}`);
   if (d.direct) lines.push('Direct flights only');
   if (d.seasonNote) lines.push(`<i>${esc(d.seasonNote)}</i>`);
-  const v = visaFor(list(user.passports), list(user.visas), placeByCode(d.destination)?.cc);
-  if (needsEmbassy(v)) lines.push(`\n⚠️ Heads-up: ${esc(countryName(placeByCode(d.destination).cc))} needs ${v.code === 'N' ? 'special permission' : 'an embassy visa'} for your passport. That can take weeks, so apply early. Tap 🌏 Easier places after searching for visa-friendly ideas.`);
-  if (d.depart.type === 'date') lines.push('\nAre your dates fixed, or can you move them a little? Flexible dates often save money.');
+  const destCc = placeByCode(d.destination)?.cc;
+  const v = visaFor(list(user.passports), list(user.visas), destCc, yesCountries(vmap));
+  if (askVisa) {
+    lines.push(`\n🛂 ${esc(countryName(askVisa))} needs ${v?.code === 'E' ? 'an e-visa' : 'a visa'} for your passport. Do you already have a valid one? (I'll remember for next time.)`);
+  } else if (needsEmbassy(v) && vmap[destCc] !== 'yes') {
+    lines.push(`\n⚠️ Heads-up: ${esc(countryName(destCc))} needs ${v.code === 'N' ? 'special permission' : 'an embassy visa'} for your passport. That can take weeks, so apply early. Tap 🌏 Easier places after searching for visa-friendly ideas.`);
+  }
+  if (d.depart.type === 'date' && d.flex === 'exact') lines.push('\nAre your dates fixed, or can you move them a little? Flexible dates often save money.');
+  if (!d.oneWay && !d.ret && (d.depart.type === 'month' || d.flex === 'month') && !d.stay) lines.push('\nHow long will you stay? Pick below, or just search any length.');
   return lines.join('\n');
 }
 
@@ -384,6 +472,7 @@ export async function fetchRanked(env, draft, user) {
   const ranked = items.length ? rankFares(items, {
     persona: draft.persona, adults: draft.adults, children: draft.children, budget: draft.budget,
     currency, destTz: dest?.tz, avoidNight: draft.avoidNight, nights: draft.nights, oneWay: draft.oneWay, ...windows,
+    stayRange: !draft.oneWay && !draft.nights && STAYS[draft.stay] ? STAYS[draft.stay].slice(0, 2) : null,
   }) : [];
   return { res: { items, currency, capped }, ranked, q: queries[0] };
 }
@@ -413,82 +502,92 @@ async function runSearch(env, user, chat, draft, isGroup) {
   await recordPrice(env, route, month, best, res.currency);
   const searchId = await saveSearch(env, user.id, chat.id, { draft, best, currency: res.currency });
 
-  const msg = await formatResults(env, user, draft, ranked, res.currency, pax, stats, best);
+  if (!isGroup) await noteInterest(env, user.id, draft);
+  const vmap = isGroup ? {} : await countryVisaMap(env, user.id);
+  const msg = await formatResults(env, user, draft, ranked, res.currency, pax, stats, best, vmap);
   const keyboard = [];
+  let shareHref = null;
   for (const r of ranked) {
-    const href = await trackedLink(env, bookingUrl(env, r.it), user.id, 'flight');
-    if (href) keyboard.push([url(`${LABEL_ICON[r.labels[0]]} Book ${r.labels[0].toLowerCase()} · ${money(r.it.price, res.currency)}`, href)]);
+    const meta = { sid: searchId, origin: draft.origin, destination: draft.destination, depart: r.it.departure_at.slice(0, 10),
+      ret: r.it.return_at ? r.it.return_at.slice(0, 10) : null, adults: draft.adults, children: draft.children || 0 };
+    const href = await trackedLink(env, bookingUrl(env, r.it), user.id, 'flight', meta);
+    if (href) keyboard.push([url(`${LABEL_ICON[r.labels[0]]} ${airline(r.it.airline)} · ${money(r.it.price, res.currency)} · Book`, href)]);
+    if (!shareHref && href) shareHref = href;
   }
   keyboard.push([btn('🔔 Track this trip', `r:w:${searchId}`), btn('📅 Cheaper dates', `r:dates:${searchId}`)]);
-  const v = visaFor(list(user.passports), list(user.visas), placeByCode(draft.destination)?.cc);
+  const v = visaFor(list(user.passports), list(user.visas), placeByCode(draft.destination)?.cc, yesCountries(vmap));
   keyboard.push([btn(needsEmbassy(v) ? '🌏 Easier places' : '🌏 Similar places', `r:alt:${searchId}`), btn('✏️ Change', 'd:grp')]);
+  const live = liveSearchUrl(env, { origin: draft.origin, destination: draft.destination, depart: ranked[0].it.departure_at.slice(0, 10),
+    ret: draft.oneWay || !ranked[0].it.return_at ? undefined : ranked[0].it.return_at.slice(0, 10), adults: draft.adults });
+  keyboard.push([url('🔎 All live prices, incl. connecting flights', await trackedLink(env, live, user.id, 'live'))]);
+  const second = [];
+  if (env.TP_TRS) second.push(btn('🧳 Trip toolkit', `r:tk:${searchId}`));
+  const top = ranked[0].it;
+  const shareText = `✈️ ${placeName(draft.origin)} → ${placeName(draft.destination)}, ${fmtDay(top.departure_at)}: from ${money(top.price, res.currency)} per person (${airline(top.airline)}, ${top.transfers === 0 ? 'direct' : `${top.transfers} stop`}). Found by Maya on CityWide Trip Planner${shareHref ? `: ${shareHref}` : ''}`;
+  second.push(url('📤 Share on WhatsApp', `https://wa.me/?text=${encodeURIComponent(shareText)}`));
+  keyboard.push(second);
   if (!isGroup && user.email) keyboard.push([btn('📧 Email me this plan', `r:em:${searchId}`)]);
-  for (const ex of await extrasFor(env, user, draft, ranked)) keyboard.push([url(ex.text, ex.href)]);
+  // one money-making extra that fits this trip (only programs you've joined)
+  const ctx = toolkitContext(draft, ranked[0].it);
+  ctx.lateArrival = ranked.some((r) => r.late);
+  const extra = (await toolkit(env, ctx, 1))[0];
+  if (extra) keyboard.push([url(extra.text, extra.href)]);
+  const gear = await gearButton(env, user, draft, ranked[0].it);
+  if (gear) keyboard.push([gear]);
   return send(env, chat.id, msg, keyboard);
 }
 
-function pickLines(r, cur, pax) {
+// One option, carrier first, laid out like an e-ticket.
+function pickLines(r, cur, pax, i, d) {
   const it = r.it;
-  const stopsTxt = it.transfers === 0 ? 'direct' : `${it.transfers} stop${it.transfers > 1 ? 's' : ''}`;
+  const dest = placeByCode(d.destination);
+  const orig = placeByCode(d.origin);
+  const back = it.return_at ? backMinutes(it) : 0;
+  const ret = it.return_at ? arrivalLocal(it.return_at, back, orig?.tz) : null;
   const lines = [
     '',
-    `${r.labels.map((l) => `${LABEL_ICON[l]} <b>${l}</b>`).join(' · ')}`,
+    `${LABEL_ICON[r.labels[0]] || '✈️'} <b>Option ${i + 1} · ${r.labels.join(' · ')} · ${esc(airline(it.airline))}</b>`,
     `<b>${money(it.price, cur)}</b> per person${pax > 1 ? ` · about ${money(it.price * pax, cur)} for ${pax}` : ''}`,
-    `${esc(airline(it.airline))} · ${stopsTxt}${it.duration_to ? ` · ${fmtDur(it.duration_to)}` : ''}`,
-    `Out ${fmtDay(it.departure_at)} ${hhmm(r.dep)}${r.arr ? ` → lands about ${hhmm(r.arr)} local` : ''}`,
+    `🛫 ${tgDate(it.departure_at)} · ${hhmm(r.dep)} ${esc(placeName(d.origin))} → ${r.arr ? `${hhmm(r.arr)}${plusDay(r.dep.date, r.arr)} ` : ''}${esc(placeName(d.destination))}`,
+    `     ${stopsText(d.origin, d.destination, it.duration_to, it.transfers)}${it.duration_to ? ` · ${fmtDur(it.duration_to)}` : ''}`,
   ];
-  if (it.return_at) lines.push(`Back ${fmtDay(it.return_at)} ${hhmm({ hour: +it.return_at.slice(11, 13), minute: +it.return_at.slice(14, 16) })}`);
+  if (it.return_at) {
+    const n = Math.round((Date.parse(it.return_at.slice(0, 10)) - Date.parse(it.departure_at.slice(0, 10))) / 86400000);
+    const rd = localParts(it.return_at);
+    lines.push(`🛬 ${tgDate(it.return_at)} · ${hhmm(rd)} ${esc(placeName(d.destination))} → ${ret ? `${hhmm(ret)}${plusDay(rd.date, ret)} ` : ''}${esc(placeName(d.origin))}`);
+    lines.push(`     ${stopsText(d.destination, d.origin, back, it.return_transfers ?? it.transfers)}${back ? ` · ${fmtDur(back)}` : ''} · ${n} night${n === 1 ? '' : 's'} in ${esc(dest?.name || '')}`);
+  } else lines.push('     One way');
   if (r.reasons.why.length) lines.push(`✅ ${r.reasons.why.join(', ')}`);
   if (r.reasons.warn.length) lines.push(`⚠️ ${r.reasons.warn.join('; ')}`);
   return lines.join('\n');
 }
+const tgDate = (iso) => new Date(`${iso.slice(0, 10)}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).replace(/^(\w+) /, '$1, ');
+const backMinutes = (it) => it.duration_back || (it.duration && it.duration > (it.duration_to || 0) ? it.duration - (it.duration_to || 0) : 0);
 
-async function formatResults(env, user, draft, ranked, cur, pax, stats, best) {
+async function formatResults(env, user, draft, ranked, cur, pax, stats, best, vmap = {}) {
   const who = (PERSONAS[draft.persona] || {}).label;
-  const out = [`Here's what I found, ${firstName(user)} 👇`, `<b>${esc(placeName(draft.origin))} → ${esc(placeName(draft.destination))}</b>${who ? ` · for a ${esc(who.toLowerCase())}` : ''}`];
+  const out = [`Here's what I found, ${firstName(user)} 👇`, `<b>${esc(placeName(draft.origin))} ${draft.oneWay ? '→' : '⇄'} ${esc(placeName(draft.destination))}</b> · ${draft.oneWay ? 'one way' : 'return'}${who ? ` · for a ${esc(who.toLowerCase())}` : ''}`];
   if (stats && stats.n >= 3 && stats.low) {
     out.push(best <= stats.low ? '📉 Lowest price I have seen for this route this month.' : `Lowest I've seen recently: ${money(stats.low, cur)}.`);
   }
-  for (const r of ranked) out.push(pickLines(r, cur, pax));
+  for (const [i, r] of ranked.entries()) out.push(pickLines(r, cur, pax, i, draft));
   out.push('');
+  if (ranked[0].perPersonBudget && ranked.every((r) => r.overBudget)) {
+    const low = Math.min(...ranked.map((r) => r.it.price));
+    out.push(`💡 All of these are above your budget of ${money(ranked[0].perPersonBudget, cur)} per person (cheapest is ${money(low, cur)}). Try 📅 Cheaper dates or another month, tap 🔔 and I'll tell you if it drops, or tap 🔎 to see all live prices including connections.`);
+  }
   const w = await weatherLine(env, draft.origin, draft.destination, ranked[0].it.departure_at.slice(0, 7));
   if (w) out.push(esc(w.line));
   const destCc = placeByCode(draft.destination)?.cc;
-  const vl = visaLine(visaFor(list(user.passports), list(user.visas), destCc), destCc);
+  const vl = visaLine(visaFor(list(user.passports), list(user.visas), destCc, yesCountries(vmap)), destCc);
   if (vl) out.push(vl);
+  const news = await latestNewsFor(env, destCc);
+  if (news) out.push(newsLine(news, countryName(destCc), esc));
   if (user.country === 'BD') {
-    if (user.pay === 'intl') out.push('💳 Tip: airlines\' own Bangladesh websites accept dual-currency cards for tickets with no $300 limit.');
-    else out.push('💳 Paying in taka (bKash, Nagad, local card)? Foreign sites may decline Bangladeshi cards above $300. Compare the same dates on <a href="https://www.gozayaan.com">GoZayaan</a> or <a href="https://sharetrip.net">ShareTrip</a>, or the airline\'s own Bangladesh site.');
+    out.push('💳 Paying from Bangladesh: airlines\' own Bangladesh websites take dual-currency cards with no $300 limit. Paying in taka (bKash, Nagad, local card)? Compare the same dates on <a href="https://www.gozayaan.com">GoZayaan</a> or <a href="https://sharetrip.net">ShareTrip</a>.');
   }
   out.push(`<i>Prices were seen by travellers in the last 48 h; the booking site shows the live price${pax > 1 ? ' (children\'s fares may differ)' : ''}.</i>`);
   return out.join('\n');
-}
-
-async function extrasFor(env, user, draft, ranked) {
-  const enabled = String(env.EXTRAS_ENABLED || '').split(',').map((s) => s.trim()).filter(Boolean);
-  if (!enabled.length) return [];
-  const dest = placeByCode(draft.destination);
-  const top = ranked[0];
-  const extras = [];
-  if (enabled.includes('transfer') && ranked.some((r) => r.late) && (draft.persona === 'family' || draft.persona === 'women')) {
-    const l = await partnerLink(env, 'https://holidaytaxis.com/');
-    if (l) extras.push({ text: '🚕 Pre-book an airport transfer', href: l });
-  }
-  if (enabled.includes('hotels') && dest && top?.it?.return_at) {
-    const pax = (draft.adults || 1) + (draft.children || 0);
-    const target = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(dest.name)}&checkin=${top.it.departure_at.slice(0, 10)}&checkout=${top.it.return_at.slice(0, 10)}&group_adults=${draft.adults || 1}&group_children=${draft.children || 0}&no_rooms=${Math.max(1, Math.ceil(pax / 3))}`;
-    const l = await partnerLink(env, target);
-    if (l) extras.push({ text: `🏨 Hotels in ${dest.name} for these dates`, href: l });
-  }
-  if (enabled.includes('esim') && dest && dest.cc !== placeByCode(draft.origin)?.cc) {
-    const l = await partnerLink(env, 'https://yesim.app/');
-    if (l) extras.push({ text: '📶 Travel eSIM (data on landing)', href: l });
-  }
-  if (enabled.includes('lounge') && ranked.some((r) => r.it.transfers > 0 && r.it.duration_to > 600)) {
-    const l = await partnerLink(env, 'https://www.prioritypass.com/');
-    if (l) extras.push({ text: '🛋️ Lounge access for the long layover', href: l });
-  }
-  return extras.slice(0, 2);
 }
 
 // ---------------- buttons ----------------
@@ -537,6 +636,26 @@ async function onCallback(env, cq) {
     if (a === 'cmp') return compareCountry(env, user, chat, draft, b);
     if (a === 'm') { draft.depart = { type: 'month', value: b }; draft.flex = 'month'; delete draft.ret; return continueDraft(env, user, chat, draft, false); }
     if (a === 'flex' && ['exact', '3d', 'month'].includes(b)) { draft.flex = b; return continueDraft(env, user, chat, draft, false); }
+    if (a === 'ad' && +b >= 1 && +b <= 9) { draft.adults = +b; draft.paxGuess = false; return continueDraft(env, user, chat, draft, false); }
+    if (a === 'ch' && +b >= 0 && +b <= 8) { draft.children = +b; draft.paxGuess = false; return continueDraft(env, user, chat, draft, false); }
+    if (a === 'mgo' && draft.multi) return startMulti(env, user, chat, draft, false);
+    if (a === 'mchg' && draft.multi) return continueDraft(env, user, chat, draft, false);
+    if (a === 'mn' && draft.multi && +b >= 1 && +b <= 60) { draft.nights = +b; return continueDraft(env, user, chat, draft, false); }
+    if (a === 'mrm' && draft.multi) {
+      draft.multi = draft.multi.filter((c) => c !== b);
+      if (draft.multi.length === 1) { draft.destination = draft.multi[0]; delete draft.multi; } else draft.destination = draft.multi[0];
+      return continueDraft(env, user, chat, draft, false);
+    }
+    if (a === 'way') { draft.oneWay = b === 'ow'; if (draft.oneWay) delete draft.ret; return continueDraft(env, user, chat, draft, false); }
+    if (a === 'stay' && (STAYS[b] || b === 'any')) { draft.stay = b === 'any' ? null : b; delete draft.nights; return continueDraft(env, user, chat, draft, false); }
+    if (a === 'visa') {
+      const cc = data.split(':')[3];
+      if (/^[A-Z]{2}$/.test(cc) && ['yes', 'no'].includes(b)) {
+        await setCountryVisa(env, user.id, cc, b);
+        await bump(env, `visa_answer_${b}`);
+      }
+      return continueDraft(env, user, chat, draft, false);
+    }
     if (a === 'dates') return send(env, chat.id, 'Which month?', rows(nextMonths(6).map((m) => btn(fmtMonth(m), `d:m:${m}`)), 2));
     if (a === 'grp') {
       return send(env, chat.id, 'Who is travelling this time?', rows(Object.entries(PERSONAS).map(([k, v]) => btn(v.label, `d:p:${k}`)), 2));
@@ -556,6 +675,7 @@ async function onCallback(env, cq) {
     if (a === 'dates') return cheaperDates(env, user, chat, s, isGroup);
     if (a === 'alt') return similarPlaces(env, user, chat, s, isGroup);
     if (a === 'em') return emailPlan(env, user, chat, s);
+    if (a === 'tk') return showToolkit(env, user, chat, s);
     return null;
   }
 
@@ -570,6 +690,16 @@ async function onCallback(env, cq) {
   }
 
   if (ns === 'w' && a === 'off') return stopWatch(env, user, chat.id, Number(b));
+  if (ns === 'bk' && ['y', 'n', 'x'].includes(a)) return onBookedAnswer(env, user, chat, a, b);
+  if (ns === 'trip' && a === 'del') return removeTrip(env, user, chat.id, Number(b));
+  if (ns === 'cur' && CURRENCIES.includes(a)) {
+    await updateUser(env, user.id, { currency: a });
+    return send(env, chat.id, `Done! I'll show prices in ${a.toUpperCase()} from now on.`);
+  }
+  if (ns === 'uv' && a === 'del' && /^[A-Z]{2}$/.test(b)) {
+    await env.DB.prepare('DELETE FROM user_visas WHERE user_id = ? AND cc = ?').bind(user.id, b).run();
+    return send(env, chat.id, `Removed. I'll ask about ${esc(countryName(b))} again next time it matters.`);
+  }
   return null;
 }
 
@@ -603,7 +733,7 @@ async function compareCountry(env, user, chat, draft, cc) {
     delete d.ret; delete d.destCountry;
     const { res } = await fetchRanked(env, d, user);
     const w = describe(await climate(env, code), Number(ym.slice(5, 7)) - 1);
-    const weather = w ? ` · ${w.hi}°, ${w.feel}` : '';
+    const weather = w ? ` · ~${w.avg}°C, ${w.feel}` : '';
     if (res.items.length) {
       lines.push(`• <b>${esc(placeName(code))}</b> from ${money(Math.min(...res.items.map((i) => i.price)), res.currency)}${esc(weather)}`);
     } else lines.push(`• ${esc(placeName(code))}: no recent prices${esc(weather)}`);
@@ -648,7 +778,7 @@ async function similarPlaces(env, user, chat, s, isGroup) {
     if (!res.items.length) continue;
     const cheapest = Math.min(...res.items.map((i) => i.price));
     let line = `• <b>${esc(c.p.name)}</b> from ${money(cheapest, res.currency)} pp`;
-    if (c.weather) line += ` · ${c.weather.hi}°, ${esc(c.weather.feel)}`;
+    if (c.weather) line += ` · ~${c.weather.avg}°C, ${esc(c.weather.feel)}`;
     if (c.visa && c.visa.code !== 'H') line += ` · 🛂 ${esc(c.visa.text)}`;
     lines.push(line);
     kb.push([btn(`Plan ${c.p.name}`, `alt:${s.id}:${c.p.code}`)]);
@@ -659,37 +789,194 @@ async function similarPlaces(env, user, chat, s, isGroup) {
   return send(env, chat.id, lines.join('\n'), kb);
 }
 
-async function emailPlan(env, user, chat, s) {
-  if (!user.email) return send(env, chat.id, 'Add your email in /settings first and I’ll send plans there.');
+// ---------- the plan email: plain text, e-ticket layout, written like a note from Maya ----------
+const ticketDate = (isoDate) => new Date(`${isoDate}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).replace(/^(\w+) /, '$1, ');
+const shortDate = (isoDate, withMonth = true) => new Date(`${isoDate}T12:00:00Z`).toLocaleDateString('en-GB', withMonth ? { day: 'numeric', month: 'short', timeZone: 'UTC' } : { day: 'numeric', timeZone: 'UTC' });
+const plusDay = (fromDate, p) => (p && p.date > fromDate ? ` (+${Math.round((Date.parse(p.date) - Date.parse(fromDate)) / 86400000)})` : '');
+const placeLabel = (code) => `${placeName(code)} (${code})`;
+
+function ticketLeg(fromCode, toCode, depIso, minutes, arrTz, it, transfers, flightNo) {
+  const dep = localParts(depIso);
+  const arr = minutes ? arrivalLocal(depIso, minutes, arrTz) : null;
+  return {
+    date: ticketDate(dep.date),
+    depTime: hhmm(dep), from: placeLabel(fromCode),
+    arrTime: arr ? `${hhmm(arr)}${plusDay(dep.date, arr)}` : '', to: placeLabel(toCode),
+    airline: airline(it.airline),
+    flight: flightNo && /^\d{1,4}$/.test(String(flightNo)) ? `${it.airline} ${flightNo}` : '',
+    stops: stopsText(fromCode, toCode, minutes, transfers, true),
+    duration: minutes ? `${fmtDur(minutes)} total` : '',
+  };
+}
+
+// Honest saving: the picks against the average of every fare we compared for these dates.
+export function savingLines(items, ranked, cur, pax) {
+  const seen = new Map();
+  for (const it of items) seen.set(`${it.airline}|${it.flight_number}|${it.departure_at}|${it.return_at || ''}`, it);
+  const all = [...seen.values()];
+  const days = new Set(all.map((it) => it.departure_at.slice(0, 10))).size;
+  const out = [];
+  if (all.length >= 3) {
+    const avg = all.reduce((a, it) => a + it.price, 0) / all.length;
+    const low = Math.min(...ranked.map((r) => r.it.price));
+    const save = Math.round((avg - low) / 10) * 10;
+    if (save > 0 && save / avg >= 0.05) {
+      out.push(`Average fare for these dates: ${money(Math.round(avg / 10) * 10, cur)} per person.`);
+      out.push(`My cheapest pick: ${money(low, cur)}, so you save about ${money(save, cur)} each${pax > 1 ? ` (${money(save * pax, cur)} for all ${pax} of you)` : ''}.`);
+    }
+  }
+  if (all.length) out.push(`⏱ I compared ${all.length} fares across ${days} day${days === 1 ? '' : 's'} for you, so there's no searching left to do.`);
+  return out;
+}
+
+// ---------- fair use for "Email me this plan" ----------
+// The chat is home; email is a copy for later. So, per person: the same plan only once a day,
+// a short pause between emails, a few a day and a month, confirmed addresses only.
+// For the whole bot, emailRoom() in email.js keeps us inside Resend's free plan.
+const planSig = (d) => [d.origin, d.destination, d.depart?.value, d.ret?.value, d.oneWay ? 1 : 0, d.adults, d.children || 0, d.flex, d.stay, d.nights].join('|');
+const hm = (sec) => new Date(sec * 1000).toISOString().slice(11, 16);
+
+async function emailGate(env, user, d) {
+  if (!user.email) return 'Add your email in /settings first and I’ll send plans there.';
+  if (!emailReady(env)) return 'Email sending isn’t switched on yet. Your plan is right here in the chat.';
+  if (!user.email_verified) return `Please confirm your email first (/settings → Email), ${firstName(user)}. I only send plans to confirmed addresses.`;
+  const sent = await cacheGet(env, `emd:${user.id}:${planSig(d)}`);
+  if (sent) return `I already emailed you this exact plan today at ${hm(sent)} UTC 📬\nCan't find it? Check Promotions or Spam and tap "Not spam".`;
+  if (await cacheGet(env, `emcd:${user.id}`)) return 'I just sent you an email. Give it a couple of minutes before the next one 🙂';
+  const perDay = Number(env.EMAIL_USER_DAY || 2);
+  const perMonth = Number(env.EMAIL_USER_MONTH || 8);
   const usage = await getUsage(env, `u${user.id}`);
-  if ((usage.emails || 0) >= 3) return send(env, chat.id, "I've sent you 3 emails today already. Try again tomorrow!");
+  if ((usage.emails || 0) >= perDay) return `That's ${perDay} emails today, ${firstName(user)}. Your plans stay right here in the chat, and you can email more tomorrow.`;
+  if ((await counter(env, `em_u${user.id}`, monthKey())) >= perMonth) return `You've had ${perMonth} plan emails this month. Your plans stay right here in the chat 🙂`;
+  const room = await emailRoom(env, 'plan');
+  if (!room.ok) {
+    await bump(env, 'email_capped');
+    return 'Email is busy today, so I can’t send this one. Your plan stays right here in the chat, and you can try again tomorrow.';
+  }
+  return null;
+}
+
+async function emailPlan(env, user, chat, s) {
   const d = s.params.draft;
+  const gate = await emailGate(env, user, d);
+  if (gate) return send(env, chat.id, gate);
   const { res, ranked } = await fetchRanked(env, d, user);
   if (!ranked.length) return send(env, chat.id, 'Those prices have expired. Search again and I’ll email the fresh plan.');
+  const cur = res.currency;
   const pax = (d.adults || 1) + (d.children || 0);
-  const picks = [];
-  for (const r of ranked) {
-    picks.push({
-      label: r.labels.join(' · '), price: money(r.it.price, res.currency), total: pax > 1 ? money(r.it.price * pax, res.currency) : '',
-      airline: airline(r.it.airline), stops: r.it.transfers === 0 ? 'direct' : `${r.it.transfers} stop(s)`,
-      out: `Out ${fmtDay(r.it.departure_at)} ${hhmm(r.dep)}${r.arr ? `, lands about ${hhmm(r.arr)} local` : ''}`,
-      back: r.it.return_at ? `Back ${fmtDay(r.it.return_at)}` : '',
-      why: r.reasons.why.join(', '), warn: r.reasons.warn.join('; '),
-      href: await trackedLink(env, bookingUrl(env, r.it), user.id, 'email'),
+  const name = user.name || user.first_name || 'there';
+  const dest = placeByCode(d.destination);
+  const orig = placeByCode(d.origin);
+  const destCc = dest?.cc;
+  const top = ranked[0].it;
+
+  const options = [];
+  for (const [i, r] of ranked.entries()) {
+    const it = r.it;
+    const back = it.return_at ? backMinutes(it) : 0;
+    options.push({
+      title: `${LABEL_ICON[r.labels[0]] || '✈️'} OPTION ${i + 1} · ${r.labels.join(' · ').toUpperCase()} · ${airline(it.airline)}`,
+      price: money(it.price, cur), total: pax > 1 ? money(it.price * pax, cur) : '',
+      out: ticketLeg(d.origin, d.destination, it.departure_at, it.duration_to, dest?.tz, it, it.transfers, it.flight_number),
+      back: it.return_at ? ticketLeg(d.destination, d.origin, it.return_at, back, orig?.tz, it, it.return_transfers ?? it.transfers, null) : null,
+      why: r.reasons.why.length ? `Why I picked it: ${r.reasons.why.join(', ')}` : '',
+      warn: r.reasons.warn.join('; '),
+      href: await trackedLink(env, bookingUrl(env, it), user.id, 'email'),
     });
   }
-  const notes = [];
-  const w = await weatherLine(env, d.origin, d.destination, ranked[0].it.departure_at.slice(0, 7));
-  if (w) notes.push(w.line);
-  const destCc = placeByCode(d.destination)?.cc;
-  const v = visaFor(list(user.passports), list(user.visas), destCc);
-  if (v && v.code !== 'H') notes.push(`Visa: ${v.text}. Always confirm on the official government site.`);
-  const title = `Your trip: ${placeName(d.origin)} → ${placeName(d.destination)}`;
-  const mail = planEmail(env, user.name || 'there', title, picks, notes);
-  const r = await sendEmail(env, user.email, mail.subject, mail.html, mail.text);
+
+  const dep = top.departure_at.slice(0, 10);
+  const ret = top.return_at ? top.return_at.slice(0, 10) : null;
+  const sameMonth = ret && dep.slice(0, 7) === ret.slice(0, 7);
+  const range = ret ? `${shortDate(dep, !sameMonth)}–${shortDate(ret)}` : shortDate(dep);
+  const nights = ret ? Math.round((Date.parse(ret) - Date.parse(dep)) / 86400000) : 0;
+  const who = (PERSONAS[d.persona] || {}).label;
+  const trip = [
+    `${placeLabel(d.origin)} ${d.oneWay ? '→' : '⇄'} ${placeLabel(d.destination)} · ${d.oneWay ? 'One way' : 'Return'}`,
+    ret ? `${ticketDate(dep)} – ${ticketDate(ret)} · ${nights} night${nights === 1 ? '' : 's'}` : ticketDate(dep),
+    `${pax} traveller${pax === 1 ? '' : 's'}${d.children ? ` (${d.adults || 1} adult${(d.adults || 1) > 1 ? 's' : ''}, ${d.children} child${d.children > 1 ? 'ren' : ''})` : ''}${who ? ` · ${who}` : ''}`,
+  ];
+  if (ranked[0].perPersonBudget) trip.push(`Budget: ${money(ranked[0].perPersonBudget, cur)} per person`);
+
+  const visa = [];
+  const v = visaFor(list(user.passports), list(user.visas), destCc, yesCountries(await countryVisaMap(env, user.id)));
+  if (v && v.code !== 'H') {
+    const pp = v.passport ? ` with your ${countryName(v.passport)} passport` : '';
+    const SHORT = { E: 'e-visa needed', V: 'visa needed from the embassy', T: 'online travel authorisation needed', A: 'visa on arrival', N: 'entry currently not allowed' };
+    visa.push(`${countryName(destCc)}${pp}: ${v.held ? v.text : SHORT[v.code] || v.text}.`);
+    if (v.code === 'E' || v.code === 'T') visa.push('Apply online a few weeks before you fly, so there is no last-minute stress.');
+    if (v.code === 'V') visa.push('Apply at the embassy well ahead (often 3–6 weeks). Book refundable fares until it is approved.');
+    if (needsEmbassy(v) && VISA_TIPS[destCc]) visa.push(VISA_TIPS[destCc]);
+    if (['E', 'T'].includes(v.code) && OFFICIAL_EVISA[destCc]) visa.push(`Official site: ${OFFICIAL_EVISA[destCc]} (avoid look-alike agent sites)`);
+  }
+  const weather = [];
+  const w = await weatherLine(env, d.origin, d.destination, top.departure_at.slice(0, 7));
+  if (w) weather.push(w.line.replace(/^\P{L}+/u, ''));
+  if (w && /rain/i.test(w.line)) weather.push('Pack a light rain jacket or a small umbrella.');
+  const news = [];
+  const n = await latestNewsFor(env, destCc);
+  if (n) news.push(`${n.text}${n.source ? ` (${n.source})` : ''}${n.url ? `: ${n.url}` : ''}`);
+  const pay = [];
+  if (user.country === 'BD') {
+    pay.push("Airlines' own Bangladesh websites take dual-currency cards for tickets, with no $300 limit.",
+      'Paying in taka (bKash, Nagad, local card)? Foreign sites may decline Bangladeshi cards above $300.',
+      'Same dates in taka: GoZayaan https://www.gozayaan.com or ShareTrip https://sharetrip.net');
+  }
+  const extras = await toolkit(env, toolkitContext(d, top), 4);
+  const next = ['Pick the option you like and tap its "Book this" link. Fares change often, so booking within a day or two is safest.'];
+  if (v && ['E', 'V', 'T'].includes(v.code)) next.push(`Apply for your ${countryName(destCc)} ${v.code === 'V' ? 'visa' : v.code === 'T' ? 'travel authorisation' : 'e-visa'}.`);
+  next.push("Tell me in Telegram once you've booked, and I'll remind you before you fly with everything you need.");
+
+  const bot = await getConfig(env, 'bot_username');
+  const base = await publicUrl(env);
+  const unsubUrl = base && user.marketing ? `${base}/unsub?u=${user.id}&s=${await unsubSig(env, user.id)}` : '';
+  const mail = planEmail(env, {
+    name,
+    subject: `${name}, your ${placeName(d.origin)} ${d.oneWay ? '→' : '⇄'} ${placeName(d.destination)} flight plan (${range})`,
+    intro: `I've compared the flights for your trip and picked the best ones for ${pax > 1 ? 'your group' : 'you'}. Everything you need is below: choose an option, tap its link, and book.`,
+    trip, saving: savingLines(res.items, ranked, cur, pax), options, visa, weather, news, pay,
+    extras: extras.map((x) => ({ text: x.text.replace(/^\P{L}+/u, ''), href: x.href })), next,
+    chatUrl: bot ? `t.me/${bot}` : '', unsubUrl,
+  });
+  const r = await sendEmail(env, user.email, mail.subject, mail.html, mail.text, { unsubUrl });
   if (!r.ok) return send(env, chat.id, r.reason === 'not_configured' ? 'Email sending isn’t switched on yet. Your plan is right here in the chat.' : 'I couldn’t send the email right now. Please try again later.');
   await addUsage(env, `u${user.id}`, 'emails');
-  return send(env, chat.id, `📧 Sent to ${esc(user.email)}. Check your inbox, ${firstName(user)}!`);
+  await bump(env, `em_u${user.id}`, 1, monthKey());
+  await cacheSet(env, `emd:${user.id}:${planSig(d)}`, nowSec(), 86400);
+  await cacheSet(env, `emcd:${user.id}`, 1, Number(env.EMAIL_COOLDOWN_SEC || 120));
+  return send(env, chat.id, `📧 Sent to ${esc(user.email)}. Check your inbox, ${firstName(user)}!\n<i>Not there in a minute? Look in Promotions or Spam and tap "Not spam", so the next one lands in your inbox.</i>`);
 }
 
 export { addDays };
+
+async function showToolkit(env, user, chat, s) {
+  const d = s.params.draft;
+  const ctx = toolkitContext(d, null, d.origin);
+  const items = await toolkit(env, ctx, 6);
+  if (!items.length) return send(env, chat.id, 'Hotels, eSIMs and tours are coming soon here! 🧳');
+  return send(env, chat.id, `🧳 <b>Trip toolkit for ${esc(placeName(d.destination))}</b>\nEverything else you might need, ${firstName(user)}:`, items.map((x) => [url(x.text, x.href)]));
+}
+
+async function startMulti(env, user, chat, draft, isGroup) {
+  if (!(await checkSearchQuota(env, user, chat, isGroup))) return null;
+  await typing(env, chat.id);
+  if (!isGroup) for (const c of draft.multi) await noteInterest(env, user.id, { ...draft, destination: c });
+  return runMulti(env, user, chat, draft, { firstName: firstName(user), airline, trackedLink, gearButton });
+}
+
+// "🎒 Pack: Universal travel adapter · Reef-safe sunscreen" → your /gear page (Amazon links live there).
+export async function gearButton(env, user, draft, firstFare) {
+  if (!storeFor(env, user.country)) return null;
+  const base = await publicUrl(env);
+  if (!base) return null;
+  const dest = placeByCode(draft.destination);
+  if (!dest) return null;
+  const month = (firstFare?.departure_at || draft.depart?.value || '').slice(0, 7);
+  const weather = month ? describe(await climate(env, dest.code), Number(month.slice(5, 7)) - 1) : null;
+  const picks = gearPicks({
+    homeCc: user.country, destCc: dest.cc, weather, persona: draft.persona, children: draft.children || 0,
+    tags: dest.tags || [], longFlight: (firstFare?.duration_to || 0) >= 360, multi: !!draft.multi,
+  });
+  if (!picks.length) return null;
+  return url(`🎒 Pack: ${picks.map((p) => p.name).join(' · ')}`.slice(0, 120), gearUrl(base, { homeCc: user.country, destCc: dest.cc, destName: dest.name, keys: picks.map((p) => p.key) }));
+}

@@ -39,7 +39,6 @@ export function makeEnv(overrides = {}) {
     MAX_ACTIVE_WATCHES: '3',
     WATCH_BATCH: '12',
     TP_FALLBACK_MARKETS: 'us,in',
-    EXTRAS_ENABLED: '',
     PUBLIC_URL: 'https://citywide-trip-planner.example.workers.dev',
     AI: { run: async () => ({ response: '{"destination_city":"Bangkok","month":"2026-12","group":"friends"}' }) },
     BURST: { limit: async () => ({ success: (burst += 1) <= 1000 }) },
@@ -51,6 +50,12 @@ export function makeEnv(overrides = {}) {
 export const fares = { scale: 1 };
 function fixture(params) {
   const route = `${params.get('origin')}-${params.get('destination')}`;
+  // one-way legs for multi-country tests: anything touching Dhaka or Ashgabat has a fare
+  if (params.get('one_way') === 'true' && /DAC|ASB/.test(route) && !/BKK|KUL/.test(route)) {
+    const m = params.get('departure_at');
+    return [{ origin: params.get('origin'), destination: params.get('destination'), price: 15000, airline: 'HY', flight_number: '7',
+      departure_at: `${m.length === 7 ? `${m}-12` : m}T09:00:00+06:00`, transfers: 1, duration_to: 300, link: `/search/${route.replace('-', '1201')}1?t=leg` }];
+  }
   if (route !== 'DAC-BKK' && route !== 'DAC-KUL') return [];
   const s = fares.scale;
   const mk = (price, transfers, dep, dur, ret) => ({
@@ -68,7 +73,7 @@ function fixture(params) {
 }
 
 export function installFetch() {
-  const log = { telegram: [], tp: [], emails: [] };
+  const log = { telegram: [], tp: [], emails: [], partner: [], news: [] };
   globalThis.fetch = async (input, opts = {}) => {
     const u = new URL(typeof input === 'string' ? input : input.url);
     if (u.hostname === 'api.telegram.org') {
@@ -83,7 +88,11 @@ export function installFetch() {
       return new Response(JSON.stringify({ success: true, currency: u.searchParams.get('currency'), data: fixture(u.searchParams) }));
     }
     if (u.hostname === 'api.travelpayouts.com' && u.pathname.includes('/links/')) {
-      return new Response(JSON.stringify({ result: { links: [{ code: 'success', partner_url: 'https://tp.st/fake' }] } }));
+      // pretend you've joined Booking.com and Yesim only
+      const target = JSON.parse(opts.body).links[0].url;
+      const joined = /booking\.com|yesim\.app/.test(target);
+      log.partner.push(target);
+      return new Response(JSON.stringify({ result: { links: [joined ? { code: 'success', partner_url: `https://tp.st/${joined ? target.includes('booking') ? 'hotel' : 'esim' : ''}` } : { code: 'failed', message: 'trs is not subscribed for brand' }] } }));
     }
     if (u.hostname === 'cloudflare-dns.com') {
       const name = u.searchParams.get('name');
@@ -93,10 +102,17 @@ export function installFetch() {
       const lat = Number(u.searchParams.get('latitude'));
       const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
       const tropical = Math.abs(lat) < 25;
-      const hi = Object.fromEntries(months.map((m, i) => [m, tropical ? 31 + (i >= 3 && i <= 5 ? 4 : 0) : 8 + 12 * Math.sin(((i - 3) / 12) * 2 * Math.PI)]));
-      const lo = Object.fromEntries(months.map((m) => [m, hi[m] - 9]));
+      const avg = Object.fromEntries(months.map((m, i) => [m, tropical ? 27 + (i >= 3 && i <= 5 ? 3 : 0) : 4 + 14 * Math.sin(((i - 3) / 12) * 2 * Math.PI)]));
       const rain = Object.fromEntries(months.map((m, i) => [m, tropical && i >= 5 && i <= 8 ? 9 : 1]));
-      return new Response(JSON.stringify({ properties: { parameter: { T2M_MAX: hi, T2M_MIN: lo, PRECTOTCORR: rain } } }));
+      return new Response(JSON.stringify({ properties: { parameter: { T2M: avg, PRECTOTCORR: rain } } }));
+    }
+    if (u.hostname === 'www.gov.uk' && u.pathname.startsWith('/foreign-travel-advice/')) {
+      log.news.push(u.pathname);
+      const slug = u.pathname.split('/').pop().replace('.atom', '');
+      const now = new Date(Date.now() - 2 * 86400000).toISOString();
+      return new Response(`<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Travel Advice Summary</title>
+<entry><title>${slug} travel advice</title><updated>${now}</updated><link rel="alternate" type="text/html" href="https://www.gov.uk/foreign-travel-advice/${slug}"/>
+<summary>Information on Severe Flooding (&#39;Warnings and Insurance&#39; page)</summary></entry></feed>`);
     }
     if (u.hostname === 'api.resend.com') {
       const body = JSON.parse(opts.body);

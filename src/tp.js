@@ -2,18 +2,40 @@
 // Prices are a cache of what real travellers searched in the last ~48 hours,
 // so we label them "recently seen" and the booking site shows the live price.
 
-import { bump, cacheGet, cacheSet, counter } from './db.js';
+import { bump, cacheGet, cacheSet, counter, canFetch } from './db.js';
+import { placeByCode } from './places.js';
 
 const API = 'https://api.travelpayouts.com/aviasales/v3/prices_for_dates';
 const CACHE_TTL = 6 * 3600; // Travelpayouts recommends caching; 6 h keeps alerts fresh enough
 
+// Edge cache (free, per data centre). Works when the Worker runs on your own
+// domain; on workers.dev it simply finds nothing and we fall back to D1.
+async function edgeGet(key) {
+  try {
+    const r = await caches.default.match(`https://cache.citywide.internal/${encodeURIComponent(key)}`);
+    return r ? await r.json() : null;
+  } catch { return null; }
+}
+async function edgePut(key, value, ttl) {
+  try {
+    await caches.default.put(`https://cache.citywide.internal/${encodeURIComponent(key)}`,
+      new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${ttl}` } }));
+  } catch { /* not available */ }
+}
+
 async function callApi(env, params) {
   const key = `tp:${new URLSearchParams(params).toString()}`;
+  const edge = await edgeGet(key);
+  if (edge) {
+    await bump(env, 'tp_cache_hits');
+    return edge;
+  }
   const cached = await cacheGet(env, key);
   if (cached) {
     await bump(env, 'tp_cache_hits');
     return cached;
   }
+  if (!canFetch(env)) return { budget: true, data: [] };
   const max = Number(env.TP_DAILY_MAX || 3000);
   if ((await counter(env, 'tp_calls')) >= max) return { capped: true, data: [] };
   await bump(env, 'tp_calls');
@@ -33,7 +55,9 @@ async function callApi(env, params) {
     return { error: 'network', data: [] };
   }
   const out = { success: !!body.success, currency: body.currency || params.currency, data: Array.isArray(body.data) ? body.data : [] };
-  await cacheSet(env, key, out, out.data.length ? CACHE_TTL : 2 * 3600);
+  const ttl = out.data.length ? CACHE_TTL : 2 * 3600;
+  await cacheSet(env, key, out, ttl);
+  await edgePut(key, out, ttl);
   return out;
 }
 
@@ -63,7 +87,14 @@ export async function searchFares(env, q) {
     if (a.market) params.market = a.market;
     const r = await callApi(env, params);
     if (r.capped) return { capped: true, items: [] };
+    if (r.budget) return { items: [], currency: cur, budget: true };
     if (r.data.length) return { items: r.data, currency: (r.currency || a.currency).toLowerCase(), market: a.market || 'default' };
+  }
+  // Airports that changed code (Bishkek: BSZ now, FRU on most flight sites): try the old code once.
+  if (!q.altTried) {
+    const oa = placeByCode(q.origin)?.alts?.[0];
+    const da = placeByCode(q.destination)?.alts?.[0];
+    if (oa || da) return searchFares(env, { ...q, origin: oa || q.origin, destination: da || q.destination, altTried: true });
   }
   return { items: [], currency: cur };
 }
@@ -102,6 +133,7 @@ export async function partnerLink(env, targetUrl) {
   const cached = await cacheGet(env, key);
   if (cached) return cached.url || null;
   let link = null;
+  if (!canFetch(env)) return null;
   try {
     const res = await fetch('https://api.travelpayouts.com/links/v1/create', {
       method: 'POST',

@@ -53,3 +53,24 @@ test('AI output is checked, never trusted', () => {
   assert.equal(d.adults, undefined, 'absurd group size dropped');
   assert.equal(d.persona, undefined, 'unknown group dropped');
 });
+
+test('"also good" picks are real alternatives, not the same flight on other dates', () => {
+  const mk = (price, airline, fn, dep, ret, transfers = 0) => ({ price, airline, flight_number: fn, departure_at: dep, return_at: ret, transfers, duration_to: 150 });
+  const items = [
+    mk(100, 'TG', '1', '2026-12-03T13:40:00+06:00', '2026-12-07T10:55:00+07:00'),
+    mk(101, 'TG', '1', '2026-12-04T13:40:00+06:00', '2026-12-18T10:55:00+07:00'),
+    mk(102, 'TG', '1', '2026-12-05T13:40:00+06:00', '2026-12-11T10:55:00+07:00'),
+    mk(120, 'BS', '7', '2026-12-03T10:00:00+06:00', '2026-12-08T12:00:00+07:00'),
+    mk(90, 'AK', '9', '2026-12-03T06:30:00+06:00', '2026-12-08T12:00:00+07:00', 1),
+  ];
+  const r = rankFares(items, { persona: 'friends', adults: 4, currency: 'bdt', destTz: 7 });
+  const airlines = r.map((x) => x.it.airline);
+  assert.equal(new Set(airlines).size, 3, `three different airlines, got ${airlines}`);
+});
+
+test('typos are forgiven', () => {
+  assert.equal(p('trip to bangkock in december').destination, 'BKK');
+  assert.equal(p('kualalampur 4 friends january').destination, 'KUL');
+  assert.equal(p('going to thailnd next month').destCountry, 'TH');
+  assert.equal(p('cheap flights please').destination, undefined);
+});

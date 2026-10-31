@@ -57,6 +57,10 @@ export function rankFares(items, ctx) {
   if (ctx.nights && !ctx.oneWay && !ctx.returnWindow) {
     const fit = list.filter((it) => it.return_at && Math.abs(nightsBetween(it.departure_at, it.return_at) - ctx.nights) <= 2);
     if (fit.length) list = fit;
+  } else if (ctx.stayRange && !ctx.oneWay && !ctx.returnWindow) {
+    const [lo, hi] = ctx.stayRange;
+    const fit = list.filter((it) => it.return_at && nightsBetween(it.departure_at, it.return_at) >= lo && nightsBetween(it.departure_at, it.return_at) <= hi);
+    if (fit.length) list = fit;
   }
   if (!list.length) return [];
 
@@ -99,9 +103,19 @@ export function rankFares(items, ctx) {
   add(best, 'Best overall');
   add(cheapest, 'Cheapest');
   add(comfy, 'Most comfortable');
-  for (const s of byScore) {
-    if (picks.length >= 3) break;
-    if (!picks.some((x) => x.s === s)) picks.push({ s, labels: ['Also good'] });
+  // "Also good": real alternatives, not the same flight on another date.
+  // Pass 1: a different airline · pass 2: a different flight · pass 3: anything left.
+  const flightSig = (x) => `${x.it.airline}|${x.it.flight_number}`;
+  const passes = [
+    (s) => !picks.some((x) => x.s.it.airline === s.it.airline),
+    (s) => !picks.some((x) => flightSig(x.s) === flightSig(s)),
+    () => true,
+  ];
+  for (const ok of passes) {
+    for (const s of byScore) {
+      if (picks.length >= 3) break;
+      if (!picks.some((x) => x.s === s) && ok(s)) picks.push({ s, labels: ['Also good'] });
+    }
   }
   return picks.map(({ s, labels }, i) => ({
     ...s, rank: i + 1, labels, isCheapest: s === cheapest, reasons: reasonsFor(s, ctx, p, s === cheapest),

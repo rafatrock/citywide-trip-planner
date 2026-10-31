@@ -9,6 +9,10 @@ import { ensureSchema, useLink, bump, setConfig, cleanup } from './db.js';
 import { handleUpdate } from './bot.js';
 import { checkWatches } from './watch.js';
 import { dailyReport } from './admin.js';
+import { askBooked, tripReminders, weeklyDigest } from './retention.js';
+import { refreshNews } from './news.js';
+import { gearPage, storeFor } from './toolkit.js';
+import { unsubSig } from './email.js';
 import { tg } from './tg.js';
 
 const REQUIRED = ['TELEGRAM_BOT_TOKEN', 'TG_WEBHOOK_SECRET', 'SETUP_KEY', 'TP_TOKEN', 'TP_MARKER'];
@@ -47,7 +51,12 @@ async function setup(env, request) {
   await tg(env, 'setMyCommands', {
     commands: [
       { command: 'plan', description: 'Plan a new trip' },
+      { command: 'latest', description: 'Updates picked for you' },
       { command: 'watches', description: 'Your price watches' },
+      { command: 'trips', description: 'Your booked trips' },
+      { command: 'currency', description: 'Change currency' },
+      { command: 'visas', description: 'Visas you told me about' },
+      { command: 'profile', description: 'What I remember about you' },
       { command: 'settings', description: 'Home city and preferences' },
       { command: 'help', description: 'How to use the bot' },
       { command: 'privacy', description: 'What I store' },
@@ -62,8 +71,12 @@ async function setup(env, request) {
 <p>Database: ready. Open the bot in Telegram and send <b>/start</b>.</p>`);
 }
 
+// Each message or cron run gets its own copy of env with a call budget (free plan: 50).
+const withBudget = (env, max = 50) => Object.assign(Object.create(env), { __sub: { used: 0, max } });
+
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, rawEnv, ctx) {
+    const env = withBudget(rawEnv);
     const u = new URL(request.url);
     try {
       if (u.pathname === '/tg' && request.method === 'POST') {
@@ -95,6 +108,31 @@ export default {
 
       if (u.pathname === '/setup') return setup(env, request);
 
+      if (u.pathname === '/gear') {
+        const cc = (u.searchParams.get('c') || 'US').toUpperCase().slice(0, 2);
+        const store = storeFor(env, cc);
+        if (!store) return html('<h2>Coming soon</h2>', 404);
+        ctx.waitUntil(ensureSchema(env).then(() => bump(env, 'gear_views')));
+        const keys = (u.searchParams.get('i') || '').split(',').filter((k) => /^[a-z]{2,12}$/.test(k)).slice(0, 3);
+        const page = gearPage(env, store, (u.searchParams.get('d') || '').slice(0, 40), {
+          keys, homeCc: cc, destCc: (u.searchParams.get('dc') || '').toUpperCase().slice(0, 2),
+        });
+        return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+      }
+
+      if (u.pathname === '/unsub') {
+        const id = Number(u.searchParams.get('u'));
+        const ok = id && same(u.searchParams.get('s') || '', await unsubSig(env, id));
+        if (!ok) return html('<h2>This link is not valid</h2>', 400);
+        if (request.method === 'POST') {
+          await ensureSchema(env);
+          await env.DB.prepare('UPDATE users SET marketing = 0 WHERE id = ?').bind(id).run();
+          await bump(env, 'unsubscribes');
+          return html('<h2>Done</h2><p>You won\'t get deal emails any more. Trip plans you ask for will still arrive.</p>');
+        }
+        return html(`<h2>Stop deal emails?</h2><form method="post"><button style="font-size:16px;padding:10px 16px">Yes, stop deal emails</button></form>`);
+      }
+
       if (u.pathname === '/' || u.pathname === '') {
         return html('<h2>CityWide Trip Planner</h2><p>The bot is running. Find it on Telegram.</p>');
       }
@@ -105,15 +143,20 @@ export default {
     }
   },
 
-  async scheduled(event, env, ctx) {
+  async scheduled(event, rawEnv, ctx) {
+    const env = withBudget(rawEnv);
     ctx.waitUntil((async () => {
       try {
         await ensureSchema(env);
         if (event.cron === '0 3 * * *') {
           await dailyReport(env);
+          await tripReminders(env);
+          await askBooked(env);
           await cleanup(env);
         } else {
           await checkWatches(env);
+          await weeklyDigest(env);
+          await refreshNews(env);
         }
       } catch (e) {
         console.log('cron failed', e && e.stack ? e.stack : e);

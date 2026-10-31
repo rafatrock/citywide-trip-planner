@@ -1,3 +1,4 @@
+import { WORLD } from './world-data.js';
 // Places the bot understands in version 1: the most-visited cities in South and
 // Southeast Asia, East Asia (incl. China), the Middle East hubs, Europe, the UK,
 // US, Canada, Australia and New Zealand.
@@ -169,8 +170,105 @@ for (const p of PLACES) {
 }
 ALIASES.sort((a, b) => b[0].length - a[0].length);
 
+// ---------- the rest of the world (every airport with scheduled flights) ----------
+const WORLD_BY_CODE = new Map();
+const WORLD_BY_NAME = new Map(); // lower-case city name → biggest airport (rows are sorted large first)
+for (const r of WORLD) {
+  WORLD_BY_CODE.set(r[0], r);
+  const n = r[1].toLowerCase();
+  if (!WORLD_BY_NAME.has(n)) WORLD_BY_NAME.set(n, r);
+}
+for (const r of WORLD) for (const a of (r[7] || '').split(' ').filter(Boolean)) if (!WORLD_BY_CODE.has(a)) WORLD_BY_CODE.set(a, r);
+
+// Hours from UTC for an IANA time zone, right now (handles daylight saving).
+const TZ_CACHE = new Map();
+export function tzOffset(tzName, lon = 0) {
+  if (TZ_CACHE.has(tzName)) return TZ_CACHE.get(tzName);
+  let h = Math.round(lon / 15);
+  try {
+    const part = new Intl.DateTimeFormat('en-US', { timeZone: tzName, timeZoneName: 'shortOffset' })
+      .formatToParts(new Date()).find((x) => x.type === 'timeZoneName')?.value || '';
+    const m = part.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+    if (m) h = (m[1] === '-' ? -1 : 1) * (Number(m[2]) + Number(m[3] || 0) / 60);
+    else if (part === 'GMT') h = 0;
+  } catch { /* keep the longitude estimate */ }
+  TZ_CACHE.set(tzName, h);
+  return h;
+}
+
+const WORLD_PLACE = new Map();
+function worldPlace(r) {
+  if (!r) return null;
+  if (!WORLD_PLACE.has(r[0])) {
+    WORLD_PLACE.set(r[0], {
+      code: r[0], name: r[1], cc: r[2], tz: tzOffset(r[5], r[4]), region: null, tags: [], aliases: [],
+      alts: (r[7] || '').split(' ').filter(Boolean), world: true, lat: r[3], lon: r[4],
+    });
+  }
+  return WORLD_PLACE.get(r[0]);
+}
+
 export function placeByCode(code) {
-  return code ? BY_CODE.get(String(code).toUpperCase()) || null : null;
+  if (!code) return null;
+  const c = String(code).toUpperCase();
+  return BY_CODE.get(c) || worldPlace(WORLD_BY_CODE.get(c)) || null;
+}
+
+export function coordsFor(code) {
+  if (COORDS[code]) return COORDS[code];
+  const p = placeByCode(code);
+  return p?.world ? [p.lat, p.lon] : null;
+}
+
+// Airports (biggest first) in a country, from the world list.
+export function worldCitiesIn(cc, n = 8) {
+  const seen = new Set();
+  const out = [];
+  for (const r of WORLD) {
+    if (r[2] !== cc || seen.has(r[1])) continue;
+    seen.add(r[1]);
+    out.push(r[0]);
+    if (out.length >= n) break;
+  }
+  return out;
+}
+
+// Capital 3-letter words that are not airports (currencies, common words).
+const NOT_AIRPORTS = new Set(['BDT', 'USD', 'GBP', 'EUR', 'INR', 'AED', 'MYR', 'SGD', 'THB', 'AUD', 'CAD', 'NZD', 'PKR', 'SAR', 'QAR', 'TRY',
+  'JPY', 'CNY', 'HKD', 'IDR', 'PHP', 'VND', 'KRW', 'NPR', 'LKR', 'RUB', 'BRL', 'EGP', 'CHF', 'OMR', 'KWD', 'BHD', 'MAX', 'MIN', 'THE', 'AND',
+  'FOR', 'ANY', 'YOU', 'ALL', 'TWO', 'ONE', 'BUT', 'NOT', 'WAY', 'OUT', 'DAY', 'PER', 'PAX', 'KID', 'VIA', 'ASAP']);
+
+// Words that are also world city names but usually mean something else.
+const WORLD_SKIP = new Set(['mobile', 'split', 'liberal', 'independence', 'hope', 'batman', 'normal', 'friendly', 'sale', 'page',
+  'eagle', 'globe', 'paradise', 'victoria', 'aurora', 'florence', 'bath', 'reading', 'deer lake', 'beach', 'island', 'lake', 'valley',
+  'trip', 'family', 'friends', 'january', 'december', 'march', 'may', 'august', 'summer', 'winter', 'total', 'days', 'week']);
+
+// World cities mentioned in a text. To avoid false hits, the name must be written
+// like a place ("Tashkent"), or follow to/from/in/visit/via/and/a comma, or be the whole answer.
+function findWorld(text, taken) {
+  const words = [...text.matchAll(/[A-Za-z\u00C0-\u024F'’-]+/g)];
+  const found = [];
+  const short = words.length <= 3;
+  for (let i = 0; i < words.length; i += 1) {
+    for (const len of [3, 2, 1]) {
+      if (i + len > words.length) continue;
+      const start = words[i].index;
+      const last = words[i + len - 1];
+      const end = last.index + last[0].length;
+      const phrase = text.slice(start, end).replace(/\s+/g, ' ');
+      const key = phrase.toLowerCase();
+      if (key.length < 4 || WORLD_SKIP.has(key)) continue;
+      const r = WORLD_BY_NAME.get(key);
+      if (!r || taken.some(([s, e]) => start < e && end > s)) continue;
+      const before = text.slice(Math.max(0, start - 8), start).toLowerCase();
+      const ok = short || /^[A-Z\u00C0-\u00DE]/.test(phrase) || /(\bto|\bfrom|\bin|\bvisit|\bvia|\band|,)\s*$/.test(before);
+      if (!ok) continue;
+      taken.push([start, end]);
+      found.push({ code: r[0], index: start });
+      break;
+    }
+  }
+  return found;
 }
 
 const AMBIGUOUS = new Set(['nice', 'male', 'la', 'sf', 'ny', 'dc']);
@@ -198,12 +296,17 @@ export function findPlaces(text) {
     taken.push([start, end]);
     if (!found.some((f) => f.code === code)) found.push({ code, index: start });
   }
-  // bare IATA codes typed in capitals, e.g. "DAC BKK"
+  // bare IATA codes typed in capitals, e.g. "DAC BKK" or "TAS"
+  const shortMsg = text.trim().split(/\s+/).length <= 4;
   for (const m of text.matchAll(/\b([A-Z]{3})\b/g)) {
-    if (BY_CODE.has(m[1]) && !found.some((f) => f.code === m[1]) && !taken.some(([s, e]) => m.index < e && m.index + 3 > s)) {
-      found.push({ code: m[1], index: m.index });
+    if (NOT_AIRPORTS.has(m[1])) continue;
+    const code = BY_CODE.has(m[1]) ? m[1] : shortMsg ? WORLD_BY_CODE.get(m[1])?.[0] : null;
+    if (code && !found.some((f) => f.code === code) && !taken.some(([s, e]) => m.index < e && m.index + 3 > s)) {
+      found.push({ code, index: m.index });
+      taken.push([m.index, m.index + 3]);
     }
   }
+  for (const f of findWorld(text, taken)) if (!found.some((x) => x.code === f.code)) found.push(f);
   return found.sort((a, b) => a.index - b.index).map((f) => f.code);
 }
 
@@ -211,9 +314,17 @@ export function findPlaces(text) {
 export function resolvePlace(text) {
   if (!text) return null;
   const t = String(text).trim();
-  if (/^[A-Za-z]{3}$/.test(t) && BY_CODE.has(t.toUpperCase())) return BY_CODE.get(t.toUpperCase());
+  if (/^[A-Za-z]{3}$/.test(t) && placeByCode(t)) return placeByCode(t);
+  const exact = WORLD_BY_NAME.get(t.toLowerCase());
   const codes = findPlaces(t);
-  return codes.length ? BY_CODE.get(codes[0]) : null;
+  if (codes.length) return placeByCode(codes[0]);
+  if (exact) return worldPlace(exact);
+  // last try: a spelling mistake in a world city name ("tashkant")
+  if (t.length >= 5 && t.length <= 30) {
+    const f = fuzzyMatch(t, [...PLACE_NAMES, ...WORLD_NAMES]);
+    if (f) return { ...placeByCode(f.value), guessed: f.g };
+  }
+  return null;
 }
 
 // Currency per home country (prices requested in this currency, USD as fallback).
@@ -240,3 +351,55 @@ export const POPULAR_FROM = {
   NZ: ['SYD', 'MEL', 'DPS', 'TYO', 'SIN', 'HNL'],
   DEFAULT: ['DXB', 'BKK', 'LON', 'SIN', 'IST', 'TYO'],
 };
+
+// ---------- typo tolerance ----------
+// "bangkock" → Bangkok, "kualalampur" → Kuala Lumpur. Only for words of 5+ letters,
+// allowing 1 mistake (5–7 letters) or 2 mistakes (8+ letters).
+export function editDistance(a, b, max = 2) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const cur = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > max) return max + 1;
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+const STOP = new Set(['trip', 'family', 'friends', 'flight', 'flights', 'ticket', 'tickets', 'travel', 'going', 'budget', 'cheap',
+  'cheapest', 'holiday', 'holidays', 'summer', 'winter', 'december', 'january', 'february', 'march', 'april', 'august',
+  'september', 'october', 'november', 'people', 'children', 'adults', 'return', 'direct', 'business', 'honeymoon', 'please',
+  'weekend', 'nights', 'month', 'during', 'around', 'under', 'maximum', 'between', 'there', 'where', 'somewhere', 'anywhere']);
+
+// candidates: [[name, value]]; returns best value or null
+export function fuzzyMatch(text, candidates) {
+  const words = String(text).toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const grams = [];
+  for (let i = 0; i < words.length; i += 1) {
+    if (words[i].length >= 5 && !STOP.has(words[i])) grams.push(words[i]);
+    if (i + 1 < words.length && !STOP.has(words[i]) && !STOP.has(words[i + 1])) {
+      grams.push(`${words[i]} ${words[i + 1]}`, `${words[i]}${words[i + 1]}`);
+    }
+  }
+  let best = null;
+  for (const g of grams) {
+    for (const [name, value] of candidates) {
+      const n = name.toLowerCase();
+      if (n.length < 5 || Math.abs(n.length - g.length) > 2) continue;
+      const max = n.length >= 8 ? 2 : 1;
+      const d = Math.min(editDistance(g, n, max), editDistance(g, n.replace(/\s+/g, ''), max));
+      if (d <= max && (!best || d < best.d)) best = { d, value, g };
+    }
+  }
+  return best;
+}
+
+export const PLACE_NAMES = ALIASES.map(([n, code]) => [n, code]);
+
+export const WORLD_NAMES = [...WORLD_BY_NAME.entries()].map(([n, r]) => [n, r[0]]);
+export const WORLD_COUNTRIES = [...new Set(WORLD.map((r) => r[2]))];

@@ -40,9 +40,9 @@ async function onboard(env, id, { home = 'LON', persona = 'couple', email = `use
   await post(env, tap(`set:p:${persona}`, from, chat));
 }
 
-test('v2 journey: onboarding, uniqueness, search with three picks, weather, visa, email, country, flexible dates', async () => {
+test('journey: onboarding, uniqueness, search with three picks, weather, visa, email, country, flexible dates', async () => {
   const log = installFetch();
-  const env = makeEnv({ RESEND_API_KEY: 're_test', EMAIL_FROM: 'Maya at CityWide Trip <maya@citywidetrip.com>' });
+  const env = makeEnv({ RESEND_API_KEY: 're_test', EMAIL_FROM: 'Maya at CityWide Trip <maya@citywidetrip.com>', TP_TRS: '999', AMAZON_TAG_COM: 'citywide-20' });
   assert.equal((await post(env, privateMsg('/start'), 'wrong')).status, 403);
   assert.equal((await setupPage(env)).status, 200);
 
@@ -85,8 +85,8 @@ test('v2 journey: onboarding, uniqueness, search with three picks, weather, visa
   await post(env, contactMsg('8801712345678'));
   assert.match(lastText(log), /deals/);
   await post(env, tap('set:mk:1'));
-  assert.match(lastText(log), /How do you usually pay/);
-  await post(env, tap('set:pay:bkash'));
+  assert.match(lastText(log), /who usually travels with you/);
+  assert.doesNotMatch(lastText(log), /How do you usually pay/);
   await post(env, tap('set:p:friends'));
   assert.match(lastText(log), /All set, Rahim/);
   const row = env.DB.raw.prepare('SELECT name, email, email_verified, phone, passports, marketing, persona FROM users WHERE id = 42').get();
@@ -110,25 +110,44 @@ test('v2 journey: onboarding, uniqueness, search with three picks, weather, visa
 
   // ---- a one-line trip → confirmation with visa heads-up → three picks ----
   await post(env, privateMsg('Me and 3 friends, Dhaka to Bangkok, December, max 25,000 BDT each'));
-  let card = lastText(log);
+  let cardMsg = lastSent(log);
+  let card = cardMsg.body.text;
   assert.match(card, /Got it, Rahim/);
-  assert.match(card, /Dhaka \(DAC\) → Bangkok \(BKK\)/);
-  assert.doesNotMatch(card, /embassy visa/); // Thai e-visa for Bangladeshis since Jan 2025 (override)
+  assert.match(card, /Dhaka \(DAC\) ⇄ Bangkok \(BKK\) · <b>return trip<\/b>/);
+  assert.match(card, /any trip length/);
+  // Thailand needs an e-visa for Bangladeshis → Maya asks once, only because it matters
+  assert.match(card, /Thailand needs an e-visa for your passport\. Do you already have a valid one\?/);
+  assert.ok(buttons(cardMsg).some((b) => b.callback_data === 'd:visa:yes:TH'));
+  assert.ok(buttons(cardMsg).some((b) => b.callback_data === 'd:stay:week'));
+  await post(env, tap('d:visa:no:TH'));
+  assert.doesNotMatch(lastText(log), /Do you already have/, 'not asked again');
+  await post(env, tap('d:stay:week'));
+  assert.match(lastText(log), /staying 5–7 nights/);
   await post(env, tap('d:go'));
   const res = lastSent(log);
   const t = res.body.text;
   console.log(`\n---- results ----\n${t}\n-----------------`);
   assert.match(t, /Here's what I found, Rahim/);
-  assert.match(t, /⭐ <b>Best overall<\/b>/);
-  assert.match(t, /💰 <b>Cheapest<\/b>/);
+  assert.match(t, /⭐ <b>Option 1 · Best overall · Most comfortable · Thai Airways<\/b>/);
+  assert.match(t, /Dhaka ⇄ Bangkok<\/b> · return/);
+  assert.match(t, /\d+ nights/);
+  assert.match(t, /💰 <b>Option 2 · Cheapest · Malaysia Airlines<\/b>/);
+  assert.match(t, /🛫 Thu, 10 Dec · 21:00 Dhaka → 02:00 \(\+1\) Bangkok/);
+  assert.match(t, /1 stop \(about 45m connection, estimated\)/);
   assert.match(t, /🛋️ <b>Most comfortable<\/b>|Most comfortable/);
-  assert.match(t, /Bangkok in December: usually \d+° \/ \d+°C/);
+  assert.match(t, /Bangkok in December: warm, dry, around 27°C on average/);
+  assert.match(t, /thaievisa\.go\.th/);
   assert.match(t, /Thailand with your Bangladesh passport: e-visa \(apply online before you fly\)/);
   assert.match(t, /Based on data from mid-2026/);
   assert.match(t, /GoZayaan/);
   const kb = buttons(res);
-  assert.ok(kb.some((b) => b.text?.startsWith('⭐ Book best overall')));
+  assert.ok(kb.some((b) => /^⭐ Thai Airways · BDT.21,000 · Book$/.test(b.text)));
   assert.ok(kb.some((b) => b.text === '🌏 Similar places'));
+  assert.ok(kb.some((b) => b.text?.startsWith('🔎 All live prices') && b.url.includes('/go/')));
+  const wa = kb.find((b) => b.text === '📤 Share on WhatsApp');
+  assert.match(decodeURIComponent(wa.url), /^https:\/\/wa\.me\/\?text=✈️ Dhaka → Bangkok/);
+  assert.ok(kb.some((b) => b.callback_data?.startsWith('r:tk:')), 'toolkit button');
+  assert.ok(kb.some((b) => b.url === 'https://tp.st/hotel'), 'one joined-program extra inline');
   const emailBtn = kb.find((b) => b.callback_data?.startsWith('r:em:'));
   assert.ok(emailBtn, 'email-me button for users with an email');
 
@@ -136,9 +155,26 @@ test('v2 journey: onboarding, uniqueness, search with three picks, weather, visa
   await post(env, tap(emailBtn.callback_data));
   assert.match(lastText(log), /Sent to rahim@example.com/);
   const mail = log.emails.at(-1);
-  assert.equal(mail.subject, 'Your trip: Dhaka → Bangkok');
-  assert.match(mail.html, /See live price and book/);
-  assert.match(mail.html, /Hi Rahim/);
+  assert.match(mail.subject, /^Rahim, your Dhaka ⇄ Bangkok flight plan \(\d+–\d+ \w+\)$/);
+  assert.equal(mail.html, undefined, 'plain-text email only');
+  assert.match(mail.text, /^Hi Rahim,/);
+  assert.match(mail.text, /🛫 DEPART   \w+, \d+ \w+ 2026\n   \d\d:\d\d  Dhaka \(DAC\)\n   \d\d:\d\d  Bangkok \(BKK\)/);
+  assert.match(mail.text, /🛬 RETURN/);
+  assert.match(mail.text, /Non-stop/);
+  assert.match(mail.text, /💰 YOUR SAVING/);
+  assert.match(mail.text, /I compared \d+ fares/);
+  assert.match(mail.text, /🛂 VISA\n   • Thailand with your Bangladesh passport: e-visa needed\.\n   • Apply online a few weeks/);
+  assert.match(mail.text, /thaievisa\.go\.th/);
+  assert.match(mail.text, /🌤 WEATHER/);
+  assert.match(mail.text, /💳 PAYING FROM BANGLADESH/);
+  assert.match(mail.text, /👉 Book this: https:\/\/.+\/go\//);
+  assert.match(mail.text, /🎒 ALSO HANDY/);
+  assert.match(mail.text, /Don't want deal emails\?/);
+  assert.match(mail.headers['List-Unsubscribe'], /\/unsub\?u=42&s=/);
+  const tkBtn = kb.find((b) => b.callback_data?.startsWith('r:tk:'));
+  await post(env, tap(tkBtn.callback_data));
+  const tk = buttons(lastSent(log)).map((b) => b.url);
+  assert.deepEqual(tk.sort(), ['https://tp.st/esim', 'https://tp.st/hotel'], 'only programs you joined appear');
 
   // ---- easier places: embassy-visa places are skipped for this passport ----
   const sid = emailBtn.callback_data.split(':')[2];
@@ -147,9 +183,22 @@ test('v2 journey: onboarding, uniqueness, search with three picks, weather, visa
   assert.match(alt, /Ideas like Bangkok|could not find/);
   if (/Ideas like/.test(alt)) assert.doesNotMatch(alt, /embassy/);
 
-  // ---- an embassy-visa destination gets an early heads-up (BD passport → Japan) ----
+  // ---- an embassy-visa destination: asked about a visa; "yes" is remembered ----
   await post(env, privateMsg('Dhaka to Tokyo in April'));
-  assert.match(lastText(log), /needs an embassy visa/);
+  assert.match(lastText(log), /Japan needs a visa for your passport/);
+  await post(env, tap('d:visa:yes:JP'));
+  assert.doesNotMatch(lastText(log), /needs a visa|embassy/);
+  await post(env, privateMsg('/visas'));
+  assert.match(lastText(log), /Japan: have a valid visa/);
+  assert.match(lastText(log), /Thailand: no visa yet/);
+
+  // ---- spelling mistakes are forgiven, and Maya says what she guessed ----
+  await post(env, privateMsg('trip to bangkock in december'));
+  assert.match(lastText(log), /I read "bangkock" as Bangkok/);
+
+  // ---- one way ----
+  await post(env, tap('d:way:ow'));
+  assert.match(lastText(log), /→ Bangkok \(BKK\) · <b>one way<\/b>/);
 
   // ---- a country instead of a city ----
   await post(env, privateMsg('family trip to Thailand in December'));
@@ -157,7 +206,7 @@ test('v2 journey: onboarding, uniqueness, search with three picks, weather, visa
   assert.ok(buttons(lastSent(log)).some((b) => b.callback_data === 'd:dest:HKT'));
   assert.ok(buttons(lastSent(log)).some((b) => b.callback_data === 'd:cmp:TH'));
   await post(env, tap('d:dest:BKK'));
-  assert.match(lastText(log), /Dhaka \(DAC\) → Bangkok \(BKK\)/);
+  assert.match(lastText(log), /Dhaka \(DAC\) ⇄ Bangkok \(BKK\)/);
 
   // ---- flexible dates ----
   await post(env, privateMsg('Dhaka to Bangkok 10 dec, back 17 dec'));
@@ -176,6 +225,56 @@ test('v2 journey: onboarding, uniqueness, search with three picks, weather, visa
   await post(env, tap('d:go'));
   await post(env, tap('d:go'));
   assert.match(lastText(log), /used today's 5 free searches, Rahim/);
+
+  // ---- "Did you book?" a day after tapping Book, then pre-trip reminders ----
+  const bookUrl = kb.find((b) => b.text?.startsWith('⭐ ') && b.text.endsWith('· Book')).url;
+  { const c = ctx(); await worker.fetch(new Request(bookUrl), env, c); await c.done(); }
+  env.DB.raw.exec('UPDATE links SET first_click = first_click - 90000');
+  let n1 = log.telegram.length;
+  { const c = ctx(); await worker.scheduled({ cron: '0 3 * * *' }, env, c); await c.done(); }
+  const ask = sentSince(log, n1).find((m) => /Did you book your Dhaka → Bangkok trip/.test(m.body.text));
+  assert.ok(ask, 'asked once whether they booked');
+  await post(env, tap(buttons(ask).find((b) => b.text === '✅ Yes, booked!').callback_data));
+  assert.match(lastText(log), /I've saved your trip to Bangkok/);
+  await post(env, privateMsg('/trips'));
+  assert.match(lastText(log), /Dhaka → Bangkok/);
+  // pretend the trip is in 10 days → the 2-week reminder goes out
+  env.DB.raw.exec(`UPDATE trips SET depart = '${new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10)}'`);
+  n1 = log.telegram.length;
+  { const c = ctx(); await worker.scheduled({ cron: '0 3 * * *' }, env, c); await c.done(); }
+  assert.ok(sentSince(log, n1).some((m) => /2 weeks to go until Bangkok, Rahim/.test(m.body.text)));
+  assert.ok(!sentSince(log, n1).some((m) => /Did you book/.test(m.body.text)), 'never asked twice');
+
+  // ---- /latest: personal updates (searched routes, your news posts, visa, weather) ----
+  await post(env, privateMsg('/post TH,BD | Thailand e-visa now takes about 3 working days.', { id: 999, first_name: 'Admin' }));
+  await post(env, privateMsg('/latest'));
+  const lt = lastText(log);
+  assert.match(lt, /Latest for you, Rahim/);
+  assert.match(lt, /Dhaka → Bangkok<\/b> in December: from BDT/);
+  assert.match(lt, /📰 Thailand e-visa now takes about 3 working days/);
+
+  // ---- misunderstood messages are logged for you ----
+  const realAI = env.AI;
+  env.AI = { run: async () => ({ response: '{}' }) }; // the AI can't work it out either
+  await post(env, privateMsg('wanna go somewhere fun with the lads'));
+  env.AI = realAI;
+  await post(env, privateMsg('/misses', { id: 999, first_name: 'Admin' }));
+  assert.match(lastText(log), /wanna go somewhere fun with the lads/);
+
+  // ---- /currency ----
+  await post(env, privateMsg('/currency'));
+  await post(env, tap('cur:usd'));
+  assert.match(lastText(log), /prices in USD/);
+  await post(env, tap('cur:bdt'));
+
+  // ---- travel gear page (Amazon) ----
+  { const c = ctx(); const r = await worker.fetch(new Request(`${BASE}/gear?c=BD&d=Bangkok`), env, c); const h = await r.text();
+    assert.match(h, /tag=citywide-20/); assert.match(h, /As an Amazon Associate/); }
+
+  // ---- one-click unsubscribe from deal emails ----
+  { const c = ctx(); const r = await worker.fetch(new Request(mail.headers['List-Unsubscribe'].slice(1, -1), { method: 'POST', body: 'List-Unsubscribe=One-Click' }), env, c);
+    assert.equal(r.status, 200);
+    assert.equal(env.DB.raw.prepare('SELECT marketing FROM users WHERE id = 42').get().marketing, 0); }
 
   // ---- price watch and alert by name ----
   env.DB.raw.exec("DELETE FROM usage WHERE key = 'u42'");
@@ -206,12 +305,13 @@ test('v2 journey: onboarding, uniqueness, search with three picks, weather, visa
   await post(env, groupMsg('anyone hungry?'));
   assert.equal(log.telegram.length, n);
   await post(env, groupMsg('@CityWideTripPlannerBot from Dhaka to Kuala Lumpur in December, 3 people'));
-  assert.match(lastText(log), /Dhaka → Kuala Lumpur/);
+  assert.match(lastText(log), /Here's what I found, Karim/);
+  assert.match(lastText(log), /Dhaka ⇄ Kuala Lumpur/);
 
   await post(env, privateMsg('/stats', { id: 999, first_name: 'Admin' }));
   const rep = lastText(log);
   assert.match(rep, /Emails: 1 \(1 confirmed\)/);
-  assert.match(rep, /Said yes to deals: 1/);
+  assert.match(rep, /Said yes to deals: 0/); // unsubscribed above
   assert.match(rep, /Reused email\/phone refused: 1/);
   console.log(`\n---- /stats ----\n${rep}\n----------------`);
 
@@ -223,7 +323,6 @@ test('works without Resend: email is checked and saved (unconfirmed)', async () 
   const log = installFetch();
   const env = makeEnv();
   await onboard(env, 70, { home: 'DAC', persona: 'family' });
-  await post(env, tap('set:pay:local', { id: 70 }, { id: 70, type: 'private' }));
   await post(env, tap('set:p:family', { id: 70 }, { id: 70, type: 'private' }));
   const u = env.DB.raw.prepare('SELECT email, email_verified FROM users WHERE id = 70').get();
   assert.equal(u.email, 'user70@example.com');

@@ -1,8 +1,8 @@
 // Turns one plain sentence into a trip draft using simple rules.
 // The AI is used only when these rules can't find the destination (see ai.js).
 
-import { findPlaces, resolvePlace, placeByCode } from './places.js';
-import { findCountries, citiesIn, mainCity } from './countries.js';
+import { findPlaces, resolvePlace, placeByCode, fuzzyMatch, PLACE_NAMES } from './places.js';
+import { findCountries, citiesIn, mainCity, COUNTRY_NAMES } from './countries.js';
 
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const MONTH_RE = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
@@ -84,6 +84,14 @@ function parseDates(t, now) {
       return out;
     }
   }
+  // "2nd week of January", "first week of may", "last week of dec"
+  if ((m = t.match(new RegExp(`\\b(1st|2nd|3rd|4th|first|second|third|fourth|last)\\s+week\\s+(?:of\\s+)?${MONTH_RE}\\b`, 'i')))) {
+    const which = { '1st': 1, first: 1, '2nd': 2, second: 2, '3rd': 3, third: 3, '4th': 4, fourth: 4, last: 4 }[m[1].toLowerCase()];
+    const mi = monthIndex(m[2]);
+    const startDay = which === 4 && /last/i.test(m[1]) ? 22 : (which - 1) * 7 + 1;
+    const mid = dateValue(startDay + 3, mi, now);
+    if (mid) { out.depart = { type: 'date', value: mid }; out.weekFlex = true; return out; }
+  }
   // Month names: "in December", "december or january"
   const mons = [...t.matchAll(new RegExp(`\\b${MONTH_RE}\\b`, 'gi'))].map((x) => monthIndex(x[1]));
   // "may" is also a verb: only count it next to in/during/early/late/mid or another month
@@ -126,7 +134,7 @@ function parseTravellers(t) {
     const total = num(m[1].toLowerCase());
     if (!r.adults && !r.children) { r.adults = Math.min(2, total); r.children = Math.max(0, total - 2); }
   }
-  if ((m = t.match(new RegExp(`\\b(?:me|i)\\s*(?:and|&|\\+)\\s*${N}\\s*(?:friends?|buddies|mates|colleagues|others|people|girls|guys)`, 'i')))) {
+  if ((m = t.match(new RegExp(`\\b(?:me|i|myself)\\s*(?:and|&|\\+|with)\\s*${N}\\s*(?:friends?|buddies|mates|colleagues|others|people|girls|guys)`, 'i')))) {
     r.adults = num(m[1].toLowerCase()) + 1;
   } else if ((m = t.match(new RegExp(`\\b(?:group of|we are|we're|total|party of)\\s*${N}\\b`, 'i')))) {
     r.adults = Math.max(1, num(m[1].toLowerCase()) - (r.children || 0));
@@ -146,6 +154,7 @@ function parseTravellers(t) {
 }
 
 export function detectPersona(t) {
+  if (/\b(backpack\w*)\b/i.test(t)) return 'backpacker';
   if (/\b(kids?|children|child|baby|toddler|infant|family|son|daughter|parents)\b/i.test(t)) return 'family';
   if (/\b(girls|ladies|women|female|sisters|girlfriends|hen)\b/i.test(t)) return 'women';
   if (/\b(business|work trip|conference|meeting|corporate|client|office)\b/i.test(t)) return 'corporate';
@@ -197,7 +206,9 @@ export function parseTrip(text, { now = new Date(), home = null, currency = 'usd
   const fromSeg = fromMatch ? fromMatch[1].split(/\bto\b|,|\bin\b|\bfor\b/i)[0] : '';
   const toSeg = toMatch ? toMatch[1].split(/,|\bin\b|\bfor\b|\bfrom\b|\bon\b|\bwith\b|\band\b/i)[0] : '';
   let origin = fromSeg ? resolvePlace(fromSeg)?.code || null : null;
-  let destination = toSeg ? resolvePlace(toSeg)?.code || null : null;
+  const dp = toSeg ? resolvePlace(toSeg) : null;
+  let destination = dp?.code || null;
+  if (dp?.guessed) draft.guessed = dp.guessed;
   let destCountry = null;
   if (fromSeg && !origin) {
     const c = findCountries(` ${fromSeg} `)[0];
@@ -207,21 +218,58 @@ export function parseTrip(text, { now = new Date(), home = null, currency = 'usd
     const c = findCountries(` ${toSeg} `)[0];
     if (c) { const cs = citiesIn(c.cc); if (cs.length === 1) destination = cs[0]; else destCountry = c.cc; }
   }
-  if (!origin && !destination && !destCountry && codes.length >= 2) { origin = codes[0]; destination = codes[1]; }
+  // "Cairo and Istanbul" is a list of stops (from home); "Dhaka Bangkok" / "DAC BKK" is from → to.
+  const listy = !toMatch && !fromMatch && /\band\b|,|&|\+/.test(t);
+  if (!origin && !destination && !destCountry && codes.length >= 2 && !listy) { origin = codes[0]; destination = codes[1]; }
   if (!destination && !destCountry) destination = codes.find((c) => c !== origin) || null;
   if (!destination && !destCountry) {
     const oc = placeByCode(origin)?.cc;
     const c = countries.find((x) => x.cc !== oc && x.cc !== (origin ? null : homeCc)) || countries.find((x) => x.cc !== oc);
     if (c) { const cs = citiesIn(c.cc); if (cs.length === 1) destination = cs[0]; else destCountry = c.cc; }
   }
-  if (!origin && codes.length >= 2) origin = codes.find((c) => c !== destination) || null;
+  // Nothing recognised: forgive spelling mistakes ("bangkock", "thailnd").
+  if (!destination && !destCountry) {
+    const seg = toSeg || t;
+    const fp = fuzzyMatch(seg, PLACE_NAMES.filter(([, c]) => c !== origin));
+    const fc = fuzzyMatch(seg, COUNTRY_NAMES.filter(([, cc]) => cc !== placeByCode(origin)?.cc));
+    if (fp && (!fc || fp.d <= fc.d)) { destination = fp.value; draft.guessed = fp.g; }
+    else if (fc) {
+      const cs = citiesIn(fc.value);
+      if (cs.length === 1) destination = cs[0]; else destCountry = fc.value;
+      draft.guessed = fc.g;
+    }
+  }
+  if (!origin && fromSeg) {
+    const fo = fuzzyMatch(fromSeg, PLACE_NAMES);
+    if (fo) origin = fo.value;
+  }
+  if (!origin && codes.length >= 2 && !listy) origin = codes.find((c) => c !== destination) || null;
   if (!origin && home) origin = home;
   if (origin === destination) destination = null;
   if (origin) draft.origin = origin;
   if (destination) draft.destination = destination;
   else if (destCountry) draft.destCountry = destCountry;
 
+  // Several places ("Uzbekistan, Kyrgyzstan and Turkmenistan") → one multi-stop trip.
+  const oCc = placeByCode(origin)?.cc;
+  const stops = [];
+  for (const c of codes) if (c !== origin) stops.push({ code: c, index: t.indexOf(placeByCode(c)?.name || c) });
+  for (const c of countries) {
+    if (c.cc === oCc) continue;
+    if (stops.some((x) => placeByCode(x.code)?.cc === c.cc)) continue;
+    const city = mainCity(c.cc) || citiesIn(c.cc)[0];
+    if (city) stops.push({ code: city, index: c.index, fromCountry: c.cc });
+  }
+  stops.sort((a, b) => a.index - b.index);
+  const uniq = [...new Set(stops.map((x) => x.code))];
+  if (uniq.length >= 2) {
+    draft.multi = uniq.slice(0, 5);
+    draft.destination = draft.multi[0];
+    delete draft.destCountry;
+  }
+
   Object.assign(draft, parseDates(t, now));
+  if (draft.weekFlex) { draft.flex = '3d'; delete draft.weekFlex; }
 
   let m;
   if ((m = t.match(/(?<!(?:\+\/?-|±|plus or minus|give or take)\s*)\b(\d{1,2})\s*(?:nights?|days?)\b/i))) {
@@ -231,6 +279,7 @@ export function parseTrip(text, { now = new Date(), home = null, currency = 'usd
   else if (/\b(two|2)\s+weeks\b/i.test(t)) draft.nights = 14;
   else if (/\b(long\s+)?weekend\b/i.test(t)) draft.nights = /long/i.test(t) ? 3 : 2;
   if (draft.depart?.type === 'date' && !draft.ret && draft.nights) draft.ret = { type: 'date', value: addDays(draft.depart.value, draft.nights) };
+  if (draft.nights && !draft.ret) draft.stay = draft.nights <= 4 ? 'short' : draft.nights <= 7 ? 'week' : 'long';
 
   if (/\b(one[- ]?way|single trip|no return)\b/i.test(t)) draft.oneWay = true;
   if (/\b(flexible|flexi|any day|give or take|plus or minus|around those dates)\b|±|\+\/?-\s*\d/i.test(t)) draft.flex = draft.depart?.type === 'month' ? 'month' : '3d';

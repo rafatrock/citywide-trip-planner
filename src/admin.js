@@ -4,6 +4,9 @@
 import { countersFor, today, updateUser, addUsage } from './db.js';
 import { send, esc } from './tg.js';
 import { searchFares } from './tp.js';
+import { analytics } from './analytics.js';
+import { emailCaps, monthKey } from './email.js';
+import { counter } from './db.js';
 
 export function isAdmin(env, userId) {
   return String(env.ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean).includes(String(userId));
@@ -25,6 +28,8 @@ export async function buildReport(env, day) {
   const aiMax = Number(env.AI_DAILY_MAX || 800);
   const tpMax = Number(env.TP_DAILY_MAX || 3000);
   const tpTotal = g('tp_calls') + g('tp_cache_hits');
+  const caps = emailCaps(env);
+  const emMonth = await counter(env, 'emails_sent', monthKey(new Date(`${day}T12:00:00Z`)));
   return [
     `<b>📊 CityWide Trip Planner · ${day} (UTC)</b>`,
     '',
@@ -35,13 +40,16 @@ export async function buildReport(env, day) {
     `Searches: ${g('searches')} (no data: ${g('searches_empty')})`,
     `Book-link clicks: ${g('clicks')}`,
     `Trip watches: ${g('watches_created')} new · ${totals?.watches ?? 0} active · ${g('watch_checks')} checks · ${g('alerts_sent')} alerts sent`,
+    `Booked trips: ${g('trips_booked')} new (asked ${g('booked_asked')}) · /latest views: ${g('latest_views')} · digests: ${g('digests_sent')}`,
+    `Not understood: ${g('parse_misses')} (see /misses) · Visa answers: ${g('visa_answer_yes')} yes, ${g('visa_answer_no')} no`,
     '',
     '<b>Profiles (all time)</b>',
     `Emails: ${totals?.emails ?? 0} (${totals?.verified ?? 0} confirmed) · WhatsApp numbers: ${totals?.phones ?? 0} · Said yes to deals: ${totals?.optins ?? 0}`,
-    `Today: ${g('emails_verified')} emails confirmed · ${g('marketing_optins')} new opt-ins · ${g('emails_sent')} emails sent${g('email_errors') ? ` (${g('email_errors')} failed)` : ''}`,
+    `Today: ${g('emails_verified')} emails confirmed · ${g('marketing_optins')} new opt-ins`,
+    `Emails sent: ${g('emails_sent')} / ${caps.day} (codes ${g('emails_code')}, plans ${g('emails_plan')})${g('email_capped') ? ` · ${g('email_capped')} held back by limits` : ''}${g('email_errors') ? ` · ${g('email_errors')} failed` : ''} · this month ${emMonth} / ${caps.month}${emMonth >= caps.month * 0.8 ? ' ⚠️ over 80%' : ''}`,
     '',
     '<b>Free-tier budget</b>',
-    `AI calls: ${g('ai_calls')} / ${aiMax} (${pct(g('ai_calls'), aiMax)})${g('ai_tokens') ? ` · ${g('ai_tokens')} tokens` : ''}${g('ai_errors') ? ` · ${g('ai_errors')} errors` : ''}`,
+    `AI calls: ${g('ai_calls')} / ${aiMax} (${pct(g('ai_calls'), aiMax)})${g('ai_tokens') ? ` · ${g('ai_tokens')} tokens` : ''} · reused from cache: ${g('ai_cache_hits')}${g('ai_errors') ? ` · ${g('ai_errors')} errors` : ''}`,
     `Price API calls: ${g('tp_calls')} / ${tpMax} · cache hits ${pct(g('tp_cache_hits'), tpTotal)}${g('tp_errors') ? ` · ${g('tp_errors')} errors` : ''}${g('tp_rate_limited') ? ` · ${g('tp_rate_limited')} rate-limited` : ''}`,
     '',
     '<b>Abuse control</b>',
@@ -89,6 +97,9 @@ export async function handleAdmin(env, user, chat, cmd, args) {
     case '/stats':
       await send(env, chat.id, await buildReport(env, today()));
       return true;
+    case '/analytics':
+      await send(env, chat.id, await analytics(env));
+      return true;
     case '/report':
       await dailyReport(env);
       return true;
@@ -112,6 +123,37 @@ export async function handleAdmin(env, user, chat, cmd, args) {
     }
     case '/routecheck':
       await routeCheck(env, chat.id);
+      return true;
+    case '/misses': {
+      const { results } = await env.DB.prepare('SELECT text, COUNT(*) AS c, MAX(at) AS last FROM misses GROUP BY text ORDER BY last DESC LIMIT 15').all();
+      if (!results?.length) await send(env, chat.id, 'Nothing misunderstood recently. 🎉');
+      else await send(env, chat.id, `<b>Messages Maya didn't understand</b> (last 30 days)\n${results.map((r) => `• ${esc(r.text)}${r.c > 1 ? ` (×${r.c})` : ''}`).join('\n')}\n\nSend me (Claude) these and I'll teach Maya.`);
+      return true;
+    }
+    case '/post': {
+      // /post TAGS | text   e.g.  /post TH,BD | Thailand e-visa now takes 3 working days.
+      const raw = args.join(' ');
+      const [tagPart, ...rest] = raw.split('|');
+      const text = rest.join('|').trim();
+      const tags = tagPart.split(',').map((t) => t.trim().toUpperCase()).filter((t) => /^[A-Z]{2,3}$/.test(t));
+      if (!text || !tags.length) {
+        await send(env, chat.id, 'Usage: <code>/post TAGS | text</code>\nTAGS = country codes (TH, BD), city codes (BKK) or ALL. Shows in /latest for 30 days.\nExample: <code>/post TH,BD | Thailand e-visa now takes about 3 working days.</code>');
+        return true;
+      }
+      const now = Math.floor(Date.now() / 1000);
+      await env.DB.prepare('INSERT INTO news (tags, text, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(tags.join(','), text.slice(0, 400), now, now + 30 * 86400).run();
+      await send(env, chat.id, `Posted for ${tags.join(', ')}. Travellers will see it in /latest. (/news to list, /unpost &lt;id&gt; to remove)`);
+      return true;
+    }
+    case '/news': {
+      const { results } = await env.DB.prepare('SELECT * FROM news WHERE expires_at > ? ORDER BY created_at DESC LIMIT 15').bind(Math.floor(Date.now() / 1000)).all();
+      await send(env, chat.id, results?.length ? results.map((n) => `#${n.id} [${esc(n.tags)}] ${esc(n.text)}`).join('\n') : 'No news posted.');
+      return true;
+    }
+    case '/unpost':
+      if (!id) { await send(env, chat.id, 'Usage: /unpost <id>'); return true; }
+      await env.DB.prepare('DELETE FROM news WHERE id = ?').bind(id).run();
+      await send(env, chat.id, `Removed news #${id}.`);
       return true;
     case '/whoami':
       await send(env, chat.id, `Your Telegram user ID: <code>${esc(user.id)}</code>\nThis chat ID: <code>${esc(chat.id)}</code>`);
