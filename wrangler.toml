@@ -64,3 +64,6 @@ TP_SUBID = "tg"
 # Extra affiliate offers to show. Leave empty until you have joined those programs
 # in Travelpayouts. Options: hotels,esim,transfer,lounge
 EXTRAS_ENABLED = ""
+
+[placement]
+mode = "smart"
