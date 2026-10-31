@@ -92,6 +92,9 @@ export function rankFares(items, ctx) {
   const best = byScore[0];
   const cheapest = scored.reduce((a, b) => (b.it.price < a.it.price || (b.it.price === a.it.price && b.score < a.score) ? b : a));
   const comfy = scored.reduce((a, b) => (b.comfort < a.comfort || (b.comfort === a.comfort && b.it.price < a.it.price) ? b : a));
+  // fastest = least time travelling (both ways for a return), then the lower price
+  const travel = (s) => (s.it.return_at && s.it.duration ? s.it.duration : durOf(s.it)) || 1e9;
+  const fastest = scored.reduce((a, b) => (travel(b) < travel(a) || (travel(b) === travel(a) && b.it.price < a.it.price) ? b : a));
 
   // One card per distinct flight; a flight can win more than one title.
   const picks = [];
@@ -102,6 +105,7 @@ export function rankFares(items, ctx) {
   };
   add(best, 'Best overall');
   add(cheapest, 'Cheapest');
+  if (travel(fastest) < 1e9) add(fastest, 'Fastest');
   add(comfy, 'Most comfortable');
   // "Also good": real alternatives, not the same flight on another date.
   // Pass 1: a different airline · pass 2: a different flight · pass 3: anything left.
@@ -118,14 +122,15 @@ export function rankFares(items, ctx) {
     }
   }
   return picks.map(({ s, labels }, i) => ({
-    ...s, rank: i + 1, labels, isCheapest: s === cheapest, reasons: reasonsFor(s, ctx, p, s === cheapest),
+    ...s, rank: i + 1, labels, isCheapest: s === cheapest, reasons: reasonsFor(s, ctx, p, s === cheapest, s === fastest ? travel(s) : 0),
   }));
 }
 
-function reasonsFor(s, ctx, p, isCheapest) {
+function reasonsFor(s, ctx, p, isCheapest, fastestMin = 0) {
   const why = [];
   const warn = [];
   if (isCheapest) why.push('cheapest found');
+  if (fastestMin) why.push(`least time travelling (${Math.floor(fastestMin / 60)}h ${String(fastestMin % 60).padStart(2, '0')}m${s.it.return_at ? ' both ways' : ''})`);
   if (s.it.transfers === 0) why.push('direct');
   if (s.arr && !s.late && s.arr.hour >= 7 && s.arr.hour < 21) why.push('daytime arrival');
   if (s.perPersonBudget && !s.overBudget) why.push('within your budget');

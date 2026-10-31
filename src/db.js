@@ -25,6 +25,13 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS trips (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, chat_id INTEGER, origin TEXT, destination TEXT,
     depart TEXT, ret TEXT, created_at INTEGER, r14 INTEGER DEFAULT 0, r3 INTEGER DEFAULT 0, r1 INTEGER DEFAULT 0, active INTEGER DEFAULT 1)`,
   `CREATE TABLE IF NOT EXISTS news (id INTEGER PRIMARY KEY AUTOINCREMENT, tags TEXT, text TEXT, created_at INTEGER, expires_at INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS profiles (user_id INTEGER PRIMARY KEY,
+  searches INTEGER DEFAULT 0, multi INTEGER DEFAULT 0, one_way INTEGER DEFAULT 0, flexible INTEGER DEFAULT 0, direct INTEGER DEFAULT 0,
+  pax_sum INTEGER DEFAULT 0, kids INTEGER DEFAULT 0, budget INTEGER DEFAULT 0,
+  nights_sum INTEGER DEFAULT 0, nights_n INTEGER DEFAULT 0, lead_sum INTEGER DEFAULT 0, lead_n INTEGER DEFAULT 0,
+  clicks INTEGER DEFAULT 0, pick_best INTEGER DEFAULT 0, pick_cheap INTEGER DEFAULT 0, pick_fast INTEGER DEFAULT 0, pick_comfy INTEGER DEFAULT 0,
+  watches INTEGER DEFAULT 0, emails INTEGER DEFAULT 0, booked INTEGER DEFAULT 0,
+  months TEXT, places TEXT, hours TEXT, first_at INTEGER, last_at INTEGER)`,
   `CREATE INDEX IF NOT EXISTS idx_watches_due ON watches (active, last_checked)`,
   `CREATE INDEX IF NOT EXISTS idx_prices_route ON prices (route, month, currency)`,
 ];
@@ -39,7 +46,7 @@ const V2_COLUMNS = [
 const ready = new WeakSet(); // per database binding, once per Worker instance
 // Bump this when the schema changes. A fresh Worker instance checks one row instead of
 // re-running ~30 statements (that made the first message after a quiet spell slow).
-const SCHEMA_VERSION = '4.3';
+const SCHEMA_VERSION = '4.6';
 export async function ensureSchema(env) {
   if (ready.has(env.DB)) return;
   try {
@@ -101,9 +108,8 @@ export async function touchUser(env, from, chatId) {
       VALUES (?, ?, ?, ?, 'home', ?, ?, 1, ?, ?)`)
       .bind(from.id, chatId, (from.first_name || '').slice(0, 64), (from.username || '').slice(0, 64), t, t, day,
         String(from.language_code || '').slice(0, 8) || null).run();
-    await bump(env, 'new_users');
-    await bump(env, 'active_users');
-    return getUser(env, from.id);
+    await Promise.all([bump(env, 'new_users'), bump(env, 'active_users')]);
+    return { ...(await getUser(env, from.id)), isNew: true };
   }
   const newDay = existing.last_day !== day;
   // Saves database writes: only record activity once every 10 minutes (or on a new day).
@@ -138,6 +144,12 @@ export async function deleteUserData(env, id) {
     env.DB.prepare('DELETE FROM watches WHERE user_id = ?').bind(id),
     env.DB.prepare('DELETE FROM searches WHERE user_id = ?').bind(id),
     env.DB.prepare('DELETE FROM usage WHERE key = ?').bind(`u${id}`),
+    env.DB.prepare('DELETE FROM profiles WHERE user_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM interests WHERE user_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM user_visas WHERE user_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM trips WHERE user_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM misses WHERE user_id = ?').bind(id),
+    env.DB.prepare('UPDATE links SET user_id = NULL, meta = NULL WHERE user_id = ?').bind(id),
   ]);
 }
 
@@ -224,7 +236,7 @@ export async function saveLink(env, url, userId, kind, meta = null) {
 }
 
 export async function useLink(env, id) {
-  const row = await env.DB.prepare('SELECT url, kind FROM links WHERE id = ?').bind(id).first();
+  const row = await env.DB.prepare('SELECT url, kind, user_id, meta FROM links WHERE id = ?').bind(id).first();
   if (!row) return null;
   await env.DB.prepare('UPDATE links SET clicks = clicks + 1, first_click = COALESCE(first_click, ?) WHERE id = ?').bind(nowSec(), id).run();
   return row;
@@ -254,7 +266,7 @@ export async function cleanup(env) {
     env.DB.prepare('UPDATE watches SET active = 0 WHERE active = 1 AND expires_at < ?').bind(t),
     env.DB.prepare('DELETE FROM misses WHERE at < ?').bind(t - 30 * 86400),
     env.DB.prepare('DELETE FROM news WHERE expires_at < ?').bind(t),
-    env.DB.prepare("DELETE FROM counters WHERE name LIKE 'em_u%' AND day < ?").bind(`month:${new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 7)}`),
+    env.DB.prepare("DELETE FROM counters WHERE (name LIKE 'em_u%' OR name LIKE 'srch_%') AND day < ?").bind(`month:${new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 7)}`),
     env.DB.prepare('UPDATE trips SET active = 0 WHERE active = 1 AND COALESCE(ret, depart) < ?').bind(new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10)),
   ]);
 }

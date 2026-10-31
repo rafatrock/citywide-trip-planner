@@ -29,12 +29,15 @@ User: beach somewhere warm in january for my family of 5, 3 kids, not too expens
 {"destination_city":"Phuket","month":"2027-01","adults":2,"children":3,"group":"family"}`;
 
 // ---------- which model ----------
-// Default: Llama 4 Scout on Workers AI (free plan: 10,000 Neurons a day; one call ≈ 30–40 Neurons).
+// Default: OpenAI gpt-oss-120b on Workers AI, the strongest model Cloudflare runs (free plan:
+// 10,000 Neurons a day; one message ≈ 50–80 Neurons). Backup if it fails: Llama 4 Scout.
 // Optional: Claude through the Anthropic API (paid by your Anthropic account) — set the secret
 // ANTHROPIC_API_KEY and AI_MODEL = "claude-haiku-5-5" (fast, cheapest) or another Claude model.
-const DEFAULT_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
+const DEFAULT_MODEL = '@cf/openai/gpt-oss-120b';
+const BACKUP_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
 // Neurons per million tokens [input, output] (Cloudflare's price list); unknown models count as Scout.
 const NEURONS = {
+  '@cf/openai/gpt-oss-120b': [31818, 68182],
   '@cf/meta/llama-4-scout-17b-16e-instruct': [24545, 77273],
   '@cf/meta/llama-3.1-8b-instruct-fp8-fast': [4119, 34868],
   '@cf/meta/llama-3.3-70b-instruct-fp8-fast': [26668, 204805],
@@ -42,10 +45,11 @@ const NEURONS = {
   '@cf/qwen/qwen3-30b-a3b-fp8': [4625, 30475],
 };
 const modelOf = (env) => {
+  if (env.__backup) return BACKUP_MODEL;
   const m = String(env.AI_MODEL || '').trim();
   if (/^claude/i.test(m)) return env.ANTHROPIC_API_KEY ? m : DEFAULT_MODEL; // no key: stay on the free model
-  // the old default (small 8B model) is upgraded automatically
-  if (!m || m === '@cf/meta/llama-3.1-8b-instruct-fp8-fast' || m === '@cf/meta/llama-3.1-8b-instruct') return DEFAULT_MODEL;
+  // older defaults (small 8B model, Scout) are upgraded automatically
+  if (!m || ['@cf/meta/llama-3.1-8b-instruct-fp8-fast', '@cf/meta/llama-3.1-8b-instruct', BACKUP_MODEL].includes(m)) return DEFAULT_MODEL;
   return m;
 };
 
@@ -70,16 +74,33 @@ async function runModel(env, system, user, maxTokens = 220) {
     const u = body.usage || {};
     return { text: (body.content || []).map((c) => c.text || '').join(''), tokens: (u.input_tokens || 0) + (u.output_tokens || 0), neurons: 0 };
   }
+  const big = /gpt-oss/.test(model);
   const r = await env.AI.run(model, {
     messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-    max_tokens: maxTokens,
-    temperature: 0,
+    max_tokens: big ? 1200 : maxTokens, // reasoning models think before answering
+    temperature: big ? 0.2 : 0,
   });
-  const text = typeof r?.response === 'string' ? r.response : (r?.response ? JSON.stringify(r.response) : (typeof r === 'string' ? r : ''));
+  const text = textOf(r);
   const u = r?.usage || {};
   const [pin, pout] = NEURONS[model] || NEURONS[DEFAULT_MODEL];
-  const neurons = Math.ceil(((u.prompt_tokens || 900) * pin + (u.completion_tokens || 120) * pout) / 1e6);
+  const neurons = Math.ceil(((u.prompt_tokens || u.input_tokens || 1000) * pin + (u.completion_tokens || u.output_tokens || 300) * pout) / 1e6);
   return { text, tokens: u.total_tokens || 0, neurons };
+}
+
+// Workers AI models answer in a few shapes; take the final text from any of them.
+function textOf(r) {
+  if (!r) return '';
+  if (typeof r === 'string') return r;
+  if (typeof r.response === 'string') return r.response;
+  if (r.response && typeof r.response === 'object') return JSON.stringify(r.response);
+  const c = r.choices?.[0]?.message?.content;
+  if (typeof c === 'string') return c;
+  if (typeof r.output_text === 'string') return r.output_text;
+  if (Array.isArray(r.output)) {
+    const msg = r.output.filter((o) => o.type === 'message').flatMap((o) => o.content || []).map((x) => x.text || '').join('');
+    if (msg) return msg;
+  }
+  return '';
 }
 
 async function callAi(env, system, user, { userKey, cacheKey, maxTokens } = {}) {
@@ -99,9 +120,9 @@ async function callAi(env, system, user, { userKey, cacheKey, maxTokens } = {}) 
   } catch (e) {
     console.log('ai failed', e && e.message);
     await bump(env, 'ai_errors');
-    // Claude unreachable (wrong key, no credit): use the free model for this message
-    if (!/^claude/i.test(modelOf(env)) || !env.AI) return null;
-    try { out = await runModel(Object.assign(Object.create(env), { AI_MODEL: DEFAULT_MODEL, ANTHROPIC_API_KEY: '' }), system, user, maxTokens); } catch { return null; }
+    // main model unreachable (Claude key, model busy): the backup model answers this message
+    if (!env.AI) return null;
+    try { out = await runModel(Object.assign(Object.create(env), { __backup: true, ANTHROPIC_API_KEY: '' }), system, user, maxTokens); } catch { return null; }
   }
   await Promise.all([
     out.tokens ? bump(env, 'ai_tokens', out.tokens) : null,

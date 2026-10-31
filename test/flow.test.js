@@ -128,7 +128,7 @@ test('journey: onboarding, uniqueness, search with three picks, weather, visa, e
   const t = res.body.text;
   console.log(`\n---- results ----\n${t}\n-----------------`);
   assert.match(t, /Here's what I found, Rahim/);
-  assert.match(t, /⭐ <b>Option 1 · Best overall · Most comfortable · Thai Airways<\/b>/);
+  assert.match(t, /⭐ <b>Option 1 · Best overall · Fastest · Most comfortable · Thai Airways<\/b>/);
   assert.match(t, /Dhaka ⇄ Bangkok<\/b> · return/);
   assert.match(t, /\d+ nights/);
   assert.match(t, /💰 <b>Option 2 · Cheapest · Malaysia Airlines<\/b>/);
@@ -220,11 +220,10 @@ test('journey: onboarding, uniqueness, search with three picks, weather, visa, e
   assert.equal(log.tp.at(-1)?.departure_at ?? log.tp[before - 1].departure_at, '2026-12', 'flexible search asks for the whole month, then filters');
   assert.match(lastText(log), /Best overall/);
 
-  // ---- daily quota (5): used search, easier places, flexible search = 3 ----
-  await post(env, tap('d:go'));
-  await post(env, tap('d:go'));
-  await post(env, tap('d:go'));
-  assert.match(lastText(log), /used today's 5 free searches, Rahim/);
+  // ---- daily quota (7 in the first week; an old "5" left in wrangler.toml is ignored) ----
+  for (let i = 0; i < 5; i += 1) await post(env, tap('d:go'));
+  assert.match(lastText(log), /used today's 7 free searches, Rahim/);
+  assert.match(lastText(log), /After your first week you get 10 a day/);
 
   // ---- "Did you book?" a day after tapping Book, then pre-trip reminders ----
   const bookUrl = kb.find((b) => b.text?.startsWith('⭐ ') && b.text.endsWith('· Book')).url;

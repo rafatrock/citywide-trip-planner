@@ -1,3 +1,4 @@
+import { recordEvent } from './profile.js';
 // Keeping travellers coming back (all free on Telegram):
 // 1) Interests: every search teaches us where each person wants to go.
 // 2) "Did you book?" a day after someone taps Book → a saved trip.
@@ -72,6 +73,7 @@ export async function onBookedAnswer(env, user, chat, answer, linkId) {
     if (!exists) {
       await env.DB.prepare(`INSERT INTO trips (user_id, chat_id, origin, destination, depart, ret, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .bind(user.id, chat.id, meta.origin, meta.destination, meta.depart, meta.ret || null, nowSec()).run();
+      await recordEvent(env, user.id, 'booked');
       await bump(env, 'trips_booked');
     }
     const kb = (await toolkit(env, { dest: placeByCode(meta.destination), checkin: meta.depart, checkout: meta.ret, adults: meta.adults || 1, children: meta.children || 0, international: placeByCode(meta.destination)?.cc !== placeByCode(meta.origin)?.cc }, 3))

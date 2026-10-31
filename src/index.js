@@ -11,6 +11,7 @@ import { checkWatches } from './watch.js';
 import { dailyReport } from './admin.js';
 import { askBooked, tripReminders, weeklyDigest } from './retention.js';
 import { refreshNews } from './news.js';
+import { recordClick } from './profile.js';
 import { gearPage, storeFor } from './toolkit.js';
 import { unsubSig } from './email.js';
 import { tg } from './tg.js';
@@ -133,12 +134,24 @@ export default {
         return new Response('ok'); // answer Telegram fast; the work continues in the background
       }
 
+      // Public pages (booking links, gear page, unsubscribe, setup): max 10 a minute per visitor,
+      // so nobody can hammer them to burn the free daily requests and database reads.
+      if (u.pathname !== '/tg' && env.BURST) {
+        try {
+          const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+          const { success } = await env.BURST.limit({ key: `ip:${ip}` });
+          if (!success) return new Response('Too many requests, please wait a minute.', { status: 429 });
+        } catch { /* binding missing: carry on */ }
+      }
+
       if (u.pathname.startsWith('/go/')) {
         await ensureSchema(env);
         const id = u.pathname.slice(4).replace(/[^a-z0-9]/g, '').slice(0, 16);
         const row = id ? await useLink(env, id) : null;
         if (!row || !/^https:\/\//.test(row.url)) return html('<h2>This link has expired</h2><p>Search again in the bot.</p>', 404);
-        ctx.waitUntil(bump(env, 'clicks'));
+        let label = null;
+        try { label = row.meta ? JSON.parse(row.meta).label : null; } catch { /* old link */ }
+        ctx.waitUntil(Promise.all([bump(env, 'clicks'), recordClick(env, row.user_id, label)]));
         return Response.redirect(row.url, 302);
       }
 

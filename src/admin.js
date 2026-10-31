@@ -5,6 +5,7 @@ import { countersFor, today, updateUser, addUsage } from './db.js';
 import { send, esc } from './tg.js';
 import { searchFares } from './tp.js';
 import { analytics } from './analytics.js';
+import { userReport } from './profile.js';
 import { emailCaps, monthKey } from './email.js';
 import { counter } from './db.js';
 
@@ -96,6 +97,10 @@ export async function handleAdmin(env, user, chat, cmd, args) {
   switch (cmd) {
     case '/stats':
       await send(env, chat.id, await buildReport(env, today()));
+      return true;
+    case '/user':
+      if (!id) { await send(env, chat.id, 'Usage: /user <telegram user id>  (ids are in /analytics and the daily report)'); return true; }
+      await send(env, chat.id, await userReport(env, id));
       return true;
     case '/analytics':
       await send(env, chat.id, await analytics(env));

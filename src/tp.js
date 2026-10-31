@@ -70,6 +70,9 @@ function regionMarket(o, d) {
   if (cc.some((c) => CIS.has(c))) return 'ru';
   if (cc.includes('TR')) return 'tr';
   if (cc.some((c) => ['AE', 'SA', 'QA', 'OM', 'KW', 'BH'].includes(c))) return 'ae';
+  const sea = cc.find((c) => ['TH', 'MY', 'SG', 'ID', 'VN', 'PH'].includes(c));
+  if (sea) return sea.toLowerCase(); // South-East Asia: that country's travellers search it most
+  if (cc.includes('IN')) return 'in';
   return null;
 }
 
@@ -92,10 +95,10 @@ export async function searchFares(env, q) {
   const cur = (q.currency || 'usd').toLowerCase();
   const region = regionMarket(q.origin, q.destination);
   const fallbacks = String(env.TP_FALLBACK_MARKETS || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const wave1 = [{ currency: cur, market: null }, { currency: 'usd', market: region || fallbacks[0] || 'us' }];
+  const wave1 = [{ currency: cur, market: null }, { currency: cur, market: region || fallbacks[0] || 'us' }];
   const used = new Set(wave1.map((a) => a.market));
   const wave2 = [...new Set([...(region ? [fallbacks[0]] : []), ...fallbacks.slice(region ? 0 : 1), ...(region ? REGION_EXTRA[region] || [] : [])])]
-    .filter((m) => m && !used.has(m)).slice(0, 2).map((m) => ({ currency: 'usd', market: m }));
+    .filter((m) => m && !used.has(m)).slice(0, 2).map((m) => ({ currency: cur, market: m }));
 
   for (const wave of [wave1, wave2]) {
     if (!wave.length) continue;

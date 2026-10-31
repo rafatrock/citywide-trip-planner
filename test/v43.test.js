@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import worker from '../src/index.js';
 import { makeEnv, installFetch, ctx, privateMsg, tap, lastSent } from './harness.js';
 import { editDraft, groupLabel } from '../src/bot.js';
-import { chooseLegs } from '../src/multi.js';
+import { threeItineraries } from '../src/multi.js';
 
 const BASE = 'https://citywide-trip-planner.example.workers.dev';
 async function post(env, update) {
@@ -45,7 +45,7 @@ test('parser and edits: "1 adult only no children" is one adult, not a family', 
 
 test('the screenshots: edit by chat, "go" searches, the owner is never limited', async () => {
   const log = installFetch();
-  const env = makeEnv({ ADMIN_IDS: '999', NEW_SEARCHES_PER_DAY: '1' });
+  const env = makeEnv({ ADMIN_IDS: '999', SEARCHES_PER_DAY_FIRST_WEEK: '1' });
   const { U, C } = await rafat(env);
 
   await post(env, privateMsg('Dhaka to Tashkent 2nd week of january', U));
@@ -77,14 +77,12 @@ test('multi-city: Uzbekistan and Turkey, one-ticket search, stays keep their nig
   const env = makeEnv({ ADMIN_IDS: '1' });
   const { U, C } = await rafat(env, { id: 77, persona: 'friends' });
   await post(env, privateMsg('how about me with 2 friends on 2nd week of january any dates. 7 days total trip to Uzbekistan and Turkey. Backpackers.', U));
-  const card = lastText(log);
-  assert.match(card, /Dhaka → Tashkent → Istanbul → Dhaka/);
-  assert.match(card, /Backpacker \/ budget · 3 people/);
-  await post(env, tap('d:mgo', U, C));
   const res = lastSent(log);
+  assert.match(res.body.text, /Dhaka → Tashkent → Istanbul → Dhaka/);
+  assert.match(res.body.text, /Backpacker \/ budget · 3 people/);
   console.log(`\n---- multi result ----\n${res.body.text}\n----------------------`);
-  assert.match(res.body.text, /Best way to book/);
-  const whole = buttons(res).find((b) => b.text.startsWith('🔎 Whole route as one ticket'));
+  assert.match(res.body.text, /BEST OVERALL|CHEAPEST/);
+  const whole = buttons(res).find((b) => / Book( the whole)? trip/.test(b.text));
   const target = env.DB.raw.prepare('SELECT url FROM links WHERE id = ?').get(whole.url.split('/go/')[1]).url;
   const m = target.match(/\/search\/DAC(\d{4})TAS(\d{4})IST(\d{4})DAC3\?marker=/);
   assert.ok(m, target);
@@ -93,18 +91,25 @@ test('multi-city: Uzbekistan and Turkey, one-ticket search, stays keep their nig
   assert.ok(gap(dates[0], dates[1]) >= 2 && gap(dates[1], dates[2]) >= 2, `each stop keeps at least 2 of its 3 nights: ${dates}`);
 });
 
-test('leg chooser: cheapest day near the plan, never squeezing a stay', () => {
-  const legs = [{ from: 'DAC', to: 'TAS', date: '2027-01-11' }, { from: 'TAS', to: 'IST', date: '2027-01-14' }, { from: 'IST', to: 'DAC', date: '2027-01-17' }];
-  const f = (d, p) => ({ departure_at: `${d}T10:00:00+05:00`, price: p });
+test('three whole trips: best overall, cheapest, fastest; stays never squeezed', () => {
+  const legs = [{ from: 'DAC', to: 'KUL', date: '2027-01-18' }, { from: 'KUL', to: 'BKK', date: '2027-01-21' }, { from: 'BKK', to: 'DAC', date: '2027-01-24' }];
+  const f = (d, hh, p, dur, stops = 0, al = 'AK') => ({ departure_at: `${d}T${hh}:00:00+06:00`, price: p, duration_to: dur, transfers: stops, airline: al, flight_number: String(p) });
   const cands = [
-    { items: [f('2027-01-09', 300), f('2027-01-11', 250)], cur: 'usd' },
-    { items: [f('2027-01-12', 90), f('2027-01-15', 120)], cur: 'usd' }, // the 12th would leave 1 night in Tashkent
-    { items: [], cur: 'usd' },
+    { items: [f('2027-01-20', '23', 31000, 235), f('2027-01-18', '13', 36000, 390, 1, 'TG'), f('2027-01-16', '20', 34000, 240, 0, 'BS')], cur: 'bdt' },
+    { items: [f('2027-01-19', '10', 7000, 135, 0, 'VZ'), f('2027-01-23', '21', 8300, 135, 0, 'VZ'), f('2027-01-21', '09', 12000, 125, 0, 'TG')], cur: 'bdt' },
+    { items: [f('2027-01-24', '23', 23500, 155, 0, 'TG'), f('2027-01-26', '05', 15000, 400, 1, 'BS')], cur: 'bdt' },
   ];
-  const out = chooseLegs(legs, cands, { window: 3, nightsPer: [3, 3], minNights: 2 });
-  assert.equal(out[0].leg.date, '2027-01-11');
-  assert.equal(out[1].leg.date, '2027-01-15', 'skipped the too-early cheap day');
-  assert.equal(out[2].leg.date, '2027-01-18', 'no price: planned nights after the last leg');
+  const { best, cheap, fast } = threeItineraries(legs, cands, { window: 3, nightsPer: [3, 3], minNights: 2, start: '2027-01-18' }, 'backpacker');
+  const dates = (t) => t.picks.map((p) => p.leg.date);
+  for (const t of [best, cheap, fast]) {
+    const d = dates(t);
+    assert.ok(d[1] >= `2027-01-${String(Number(d[0].slice(8)) + 2).padStart(2, '0')}`, `≥ 2 nights in KL: ${d}`);
+    assert.ok(Date.parse(d[2]) - Date.parse(d[1]) >= 2 * 86400000, `≥ 2 nights in Bangkok: ${d}`);
+  }
+  const total = (t) => t.picks.reduce((s, p) => s + p.view.it.price, 0);
+  const time = (t) => t.picks.reduce((s, p) => s + p.view.dur, 0);
+  assert.ok(total(cheap) <= total(best) && total(cheap) <= total(fast));
+  assert.ok(time(fast) <= time(best) && time(fast) <= time(cheap));
 });
 
 test('AI understands replies to the open card (free model), and can use Claude when a key is set', async () => {
@@ -124,7 +129,7 @@ test('AI understands replies to the open card (free model), and can use Claude w
   assert.match(lastText(log), /^Updated ✅/);
   assert.match(lastText(log), /5 people/);
   assert.match(seen.at(-1).user, /^Current trip: DAC → BKK, 2026-12/, 'the AI sees the open trip');
-  assert.equal(seen.at(-1).model, '@cf/meta/llama-4-scout-17b-16e-instruct');
+  assert.equal(seen.at(-1).model, '@cf/openai/gpt-oss-120b', 'the strongest Cloudflare model');
   await post(env, privateMsg('sounds good, show me prices', U));
   assert.match(lastText(log), /Here's what I found|don't have recent prices/);
   const n = env.DB.raw.prepare("SELECT SUM(value) AS v FROM counters WHERE name = 'ai_neurons'").get().v;

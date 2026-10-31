@@ -1,3 +1,4 @@
+import { recordEvent } from './profile.js';
 // Trip watches: track a whole trip (route + month/dates + group) and alert
 // only when the price drops meaningfully or falls under the user's budget.
 
@@ -47,6 +48,7 @@ export async function createWatch(env, user, chat, search, limits, isGroup) {
   await env.DB.prepare(`INSERT INTO watches (user_id, chat_id, params, label, best_price, last_alert_price, currency, active, created_at, last_checked, expires_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`)
     .bind(owner, chat.id, JSON.stringify(draft), label(draft), best, best, search.params.currency || null, nowSec(), nowSec(), exp).run();
+  if (!isGroup) await recordEvent(env, user.id, 'watches');
   await addUsage(env, key, 'watches');
   await bump(env, 'watches_created');
   const target = draft.budget ? ` or it goes under your budget of ${money(draft.budget.amount, draft.budget.currency)}${draft.budget.perPerson ? ' per person' : ''}` : '';

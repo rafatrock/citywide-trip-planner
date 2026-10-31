@@ -36,37 +36,32 @@ test('the screenshot: a 3-country backpacker trip works, no loop', async () => {
   await onboard(env);
 
   await post(env, privateMsg('how about me with 2 friends on 2nd week of january any dates. 7 days total trip to Uzbekistan and Kyrgyzstan and Turkmenistan. Backpackers.', U));
-  const card = lastSent(log);
-  console.log(`\n---- multi card ----\n${card.body.text}\n--------------------`);
-  assert.match(card.body.text, /multi-country trip/);
-  assert.match(card.body.text, /Tashkent/);
-  assert.match(card.body.text, /Bishkek/);
-  assert.match(card.body.text, /Ashgabat/);
-  assert.match(card.body.text, /Backpacker \/ budget · 3 people/);
-  assert.match(card.body.text, /6 nights in total/);
-  assert.match(card.body.text, /is tight/);
-  assert.match(card.body.text, /Visas for your passport/);
-  assert.ok(buttons(card).some((b) => b.callback_data === 'd:mgo'));
-  assert.ok(buttons(card).some((b) => b.callback_data === 'd:mrm:ASB'), 'can drop a country');
-
-  await post(env, tap('d:mgo', U, C));
+  // priced straight away: every leg, three whole-trip options, totals
   const res = lastSent(log);
   console.log(`\n---- multi result ----\n${res.body.text}\n----------------------`);
-  assert.match(res.body.text, /Here's your route, Rafat/);
-  assert.match(res.body.text, /Dhaka → /);
-  assert.match(res.body.text, /Short hop: buses or shared taxis/);
-  assert.match(res.body.text, /Priced flights: about/);
-  assert.match(res.body.text, /Best way to book:/);
-  assert.ok(buttons(res).some((b) => /^1\) Uzbekistan Airways · Dhaka → .* · Book$/.test(b.text)));
-  const whole = buttons(res).find((b) => b.text.startsWith('🔎 Whole route as one ticket'));
-  assert.ok(whole, 'one multi-city search for the whole route');
+  assert.match(res.body.text, /Here's your trip, Rafat/);
+  assert.match(res.body.text, /Dhaka → Tashkent → (Bishkek → Ashgabat|Ashgabat → Bishkek) → Dhaka/);
+  assert.match(res.body.text, /Backpacker \/ budget · 3 people · 6 nights/);
+  assert.match(res.body.text, /CHEAPEST/);
+  assert.match(res.body.text, /① <b>Uzbekistan Airways<\/b>/);
+  assert.match(res.body.text, /is tight/);
+  assert.match(res.body.text, /Turkmenistan: visa needed from the embassy/);
+  assert.ok(buttons(res).some((b) => b.callback_data === 'd:mrm:ASB'), 'can drop a country');
+  assert.ok(!buttons(res).some((b) => /Book leg|^\d\) /.test(b.text)), 'no single-flight links, whole trips only');
+  const whole = buttons(res).find((b) => / Book( the whole)? trip/.test(b.text));
+  assert.ok(whole, 'a whole-trip booking link');
   const go = whole.url.split('/go/')[1];
   const target = env.DB.raw.prepare('SELECT url FROM links WHERE id = ?').get(go).url;
-  const m = target.match(/^https:\/\/www\.aviasales\.com\/search\/DAC(\d{4})TAS(\d{4})(FRU|BSZ)(\d{4})ASB(\d{4})DAC3\?marker=/);
+  const m = target.match(/^https:\/\/www\.aviasales\.com\/search\/DAC(\d{4})TAS(\d{4})[A-Z]{3}(\d{4})[A-Z]{3}(\d{4})DAC3\?marker=/);
   assert.ok(m, `one multi-city path like DAC1101TAS1401IST1801DAC3: ${target}`);
   const iso = (dm) => `2027-${dm.slice(2)}-${dm.slice(0, 2)}`;
-  const dates = [m[1], m[2], m[4], m[5]].map(iso);
+  const dates = [m[1], m[2], m[3], m[4]].map(iso);
   for (let i = 1; i < dates.length; i += 1) assert.ok(dates[i] > dates[i - 1], `leg ${i + 1} after leg ${i}: ${dates}`);
+  // changing the length re-prices without using another search
+  const used = env.DB.raw.prepare("SELECT searches FROM usage WHERE key = 'u88'").get().searches;
+  await post(env, tap('d:mn:9', U, C));
+  assert.match(lastText(log), /9 nights/);
+  assert.equal(env.DB.raw.prepare("SELECT searches FROM usage WHERE key = 'u88'").get().searches, used);
   assert.ok(buttons(res).some((b) => b.text?.startsWith('🎒 Pack:')), 'packing picks for a cold trip');
   assert.ok(log.tp.some((q) => q.origin === 'FRU' || q.destination === 'FRU'), 'Bishkek retried with its old code FRU');
 });
@@ -78,7 +73,7 @@ test('answering "Where to?" with countries or unknown places never loops', async
   await post(env, privateMsg('Me and 2 friends, 2nd week of January, 7 days, backpackers', U));
   assert.match(lastText(log), /Where would you like to go/);
   await post(env, privateMsg('Uzbekistan, Kyrgyzstan and Turkmenistan', U));
-  assert.match(lastText(log), /multi-country trip/);
+  assert.match(lastText(log), /Here's your trip/);
   assert.match(lastText(log), /3 people/, 'kept the group from the first message');
   await post(env, privateMsg('/plan', U)); // a fresh trip (with a card open, this message would edit it)
   await post(env, privateMsg('Me and 2 friends in January', U));

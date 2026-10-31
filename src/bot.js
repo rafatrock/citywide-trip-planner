@@ -21,6 +21,7 @@ import { toolkit, toolkitContext, storeFor, gearPicks, gearUrl } from './toolkit
 import { latestNewsFor, newsLine } from './news.js';
 import { noteInterest, onBookedAnswer, listTrips, removeTrip, latest } from './retention.js';
 import { money as fmtMoney } from './format.js';
+import { recordSearch, recordEvent } from './profile.js';
 import { multiSummary, multiKeyboard, runMulti, orderStops, stopsText } from './multi.js';
 import { weatherLine, climate, describe, pleasantScore } from './weather.js';
 import { sendEmail, planEmail, unsubSig, emailReady, emailRoom, monthKey } from './email.js';
@@ -57,7 +58,7 @@ export async function loadAirlineNames(env) {
   if (raw && raw !== MORE_RAW) { try { MORE_AIRLINES = JSON.parse(raw); MORE_RAW = raw; } catch { /* keep the old list */ } }
 }
 const airline = (c) => AIRLINES[c] || MORE_AIRLINES[c] || c || 'Airline';
-const LABEL_ICON = { 'Best overall': '⭐', Cheapest: '💰', 'Most comfortable': '🛋️', 'Also good': '👍' };
+const LABEL_ICON = { 'Best overall': '⭐', Cheapest: '💰', Fastest: '⚡', 'Most comfortable': '🛋️', 'Also good': '👍' };
 
 const fmtDur = (min) => (min ? `${Math.floor(min / 60)}h ${String(min % 60).padStart(2, '0')}m` : '');
 const fmtDay = (iso) => new Date(`${iso.slice(0, 10)}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
@@ -90,13 +91,17 @@ export async function trackedLink(env, href, userId, kind, meta = null) {
 }
 
 let ENV = {};
-const DEFAULTS = { NEW_SEARCHES_PER_DAY: 5, NEW_WATCHES_PER_DAY: 1, TRUSTED_SEARCHES_PER_DAY: 10, TRUSTED_WATCHES_PER_DAY: 2 };
+// Search limits (v4.6): 7 a day in someone's first week, 10 a day after, 150 a month.
+// New setting names, so older numbers left in wrangler.toml don't override them.
+const DEFAULTS = { SEARCHES_PER_DAY_FIRST_WEEK: 7, SEARCHES_PER_DAY: 10, SEARCHES_PER_MONTH: 150, NEW_WATCHES_PER_DAY: 1, TRUSTED_WATCHES_PER_DAY: 2 };
 const setting = (k) => ENV[k] ?? DEFAULTS[k];
 function limitsFor(user) {
-  if (user && isAdmin(ENV, user.id)) return { searches: 9999, watches: 99, trusted: true }; // you, the owner: no limits
+  if (user && isAdmin(ENV, user.id)) return { searches: 9999, month: 99999, watches: 99, trusted: true, owner: true }; // you: no limits
+  // "trusted" = joined over a week ago and came back on at least 2 different days (scripts rarely do)
   const trusted = user && nowSec() - (user.created_at || 0) > 7 * 86400 && (user.active_days || 0) >= 2;
   return {
-    searches: Number(trusted ? setting('TRUSTED_SEARCHES_PER_DAY') : setting('NEW_SEARCHES_PER_DAY')),
+    searches: Number(trusted ? setting('SEARCHES_PER_DAY') : setting('SEARCHES_PER_DAY_FIRST_WEEK')),
+    month: Number(setting('SEARCHES_PER_MONTH')),
     watches: Number(trusted ? setting('TRUSTED_WATCHES_PER_DAY') : setting('NEW_WATCHES_PER_DAY')),
     trusted,
   };
@@ -138,6 +143,7 @@ export async function handleUpdate(env, update) {
 
   const user = await touchUser(env, msg.from, chat.type === 'private' ? chat.id : null);
   if (user.banned) return;
+  if (user.isNew && await newUserSurge(env, chat)) return;
 
   if (!isGroup && msg.contact) return onContact(env, user, chat, msg.contact);
   if (!text) {
@@ -158,6 +164,23 @@ export async function handleUpdate(env, update) {
   return onTripText(env, user, chat, text, isGroup);
 }
 
+// A sudden flood of brand-new accounts is usually bots. Warn the owner, and above a hard cap
+// ask newcomers to come back tomorrow (people already using the bot are never affected).
+async function newUserSurge(env, chat) {
+  const n = await counter(env, 'new_users');
+  const alertAt = Number(env.NEW_USERS_ALERT || 150);
+  const cap = Number(env.NEW_USERS_PER_DAY || 600);
+  if (n === alertAt && env.ADMIN_CHAT_ID) {
+    await send(env, env.ADMIN_CHAT_ID, `⚠️ ${n} new users today. If that's not from a promotion, it may be bots: check /analytics. New sign-ups pause at ${cap} for the day.`);
+  }
+  if (n > cap) {
+    await bump(env, 'new_users_turned_away');
+    if (chat.type === 'private') await send(env, chat.id, "Hi! I'm very busy today and can't take new travellers right now. Please come back tomorrow 🙏");
+    return true;
+  }
+  return false;
+}
+
 // ---------- replies to an open trip card ----------
 // While a "Here's what I understood" card is open, short messages change that trip
 // ("1 adult only", "one way", "15 to 20 Jan", "flexible") or run it ("go", "search").
@@ -167,8 +190,12 @@ const GO = /^(go|go ahead|search|search now|yes|yep|yeah|ok(ay)?,? go|ok(ay)?,? 
 export function editDraft(prev, text, opts) {
   const t = ` ${text} `;
   const again = parseTrip(text, opts);
-  const newPlace = (again.destination && again.destination !== prev.destination && !(prev.multi || []).includes(again.destination))
-    || (again.multi && again.multi.join() !== (prev.multi || []).join()) || (again.destCountry && !prev.multi);
+  // any message naming places that differ from the open trip's = a new trip
+  // ("dac malaysia trip" while a Malaysia + Thailand card is open is a new, one-country trip)
+  const prevPlaces = (prev.multi || [prev.destination]).join();
+  const nowPlaces = again.multi ? again.multi.join() : again.destination || '';
+  const newPlace = (nowPlaces && nowPlaces !== prevPlaces) || (again.destCountry && again.destCountry !== placeByCode(prev.destination)?.cc)
+    || (again.destCountry && prev.multi);
   if (newPlace) return null;
   const d = { ...prev };
   let changed = false;
@@ -322,7 +349,7 @@ async function onCommand(env, user, chat, text, isGroup) {
     case '/about':
       return send(env, chat.id, `I'm ${me}, an AI travel assistant from CityWide Trip (citywidetrip.com). Prices come from recent traveller searches; booking happens on the airline or travel site. I never ask for passwords or card details.`);
     case '/privacy':
-      return send(env, chat.id, '<b>Privacy</b>\nI remember your name, home city, passports, visas you hold, email, optional WhatsApp number, travel preferences, price watches, and searches for 30 days. I use them to plan your trips and send what you ask for. I email deals only if you said yes. I never ask for passwords or payment details.\nSee it all with /profile, change it with /settings, erase it with /delete.');
+      return send(env, chat.id, '<b>Privacy</b>\nI remember your name, home city, passports, visas you hold, email, optional WhatsApp number, travel preferences, price watches, searches for 30 days, and a summary of how you search (places, months, group size, which options you pick) so I can suggest better trips and offers. I use them to plan your trips and send what you ask for. I email deals only if you said yes. I never ask for passwords or payment details.\nSee it all with /profile, change it with /settings, erase it with /delete.');
     case '/delete':
       await deleteUserData(env, user.id);
       return send(env, chat.id, 'Done. Everything I stored about you is deleted. Send /start whenever you want to begin again.', null, { reply_markup: { remove_keyboard: true } });
@@ -340,7 +367,7 @@ Type your trip in one line, the way you'd tell a friend:
 • <i>Family of 5, 3 kids, London to Spain, summer holidays</i>
 • <i>Business trip to Singapore 20 Nov, back 23 Nov, direct</i>
 
-I give you three picks: ⭐ best overall, 💰 cheapest and 🛋️ most comfortable, with visa and weather notes, and I can watch prices for you.
+I give you my picks: ⭐ best overall, 💰 cheapest, ⚡ fastest and 🛋️ most comfortable, with visa and weather notes, and I can watch prices for you.
 
 /plan new trip · /latest updates for you · /watches price watches · /trips booked trips · /currency · /visas · /profile · /settings · /privacy · /delete`;
 
@@ -448,11 +475,9 @@ async function continueDraft(env, user, chat, draft, isGroup) {
   }
   await saveDraft(env, user, draft, isGroup);
   if (draft.multi) {
-    if (isGroup) return startMulti(env, user, chat, draft, isGroup);
-    const vm = await countryVisaMap(env, user.id);
-    const kb = multiKeyboard(draft);
-    if (draft.paxGuess) kb.splice(1, 0, ...paxRows(draft));
-    return send(env, chat.id, pre + multiSummary(user, draft, vm, firstName(user), groupLabel) + (draft.paxGuess ? '\n\n👥 How many are going? (my guess is above; tap to change)' : ''), kb);
+    // multi-country trips are priced straight away: every leg, three whole-trip options and totals
+    if (pre && !isGroup) await send(env, chat.id, 'Updated ✅ Re-pricing your trip…');
+    return startMulti(env, user, chat, draft, isGroup);
   }
   if (isGroup) return runSearch(env, user, chat, draft, isGroup);
   const vmap = await countryVisaMap(env, user.id);
@@ -534,19 +559,27 @@ function summary(env, user, d, vmap = {}, askVisa = null) {
 }
 
 async function checkSearchQuota(env, user, chat, isGroup) {
+  // in a group, the person asking also uses their own allowance (so many groups can't multiply it)
+  if (isGroup && !(await checkSearchQuota(env, user, { id: chat.id, personal: true }, false))) return false;
   const key = quotaKey(user, chat, isGroup);
   const lim = limitsFor(user);
-  const usage = await getUsage(env, key);
+  const mkey = `srch_${key}`;
+  const [usage, month] = await Promise.all([getUsage(env, key), counter(env, mkey, monthKey())]);
   const allowed = (isGroup ? lim.searches * 2 : lim.searches) + (usage.bonus || 0);
+  const monthAllowed = (isGroup ? lim.month * 2 : lim.month) + (usage.bonus || 0);
   if (usage.searches >= allowed) {
     await bump(env, 'quota_blocked');
-    await send(env, chat.id, `You've used today's ${allowed} free searches, ${firstName(user)}. They reset at midnight UTC.${lim.trusted ? '' : ' Regular users get more after their first week.'}\nYour price watches keep running meanwhile.`);
+    await send(env, chat.id, `You've used today's ${allowed} free searches, ${firstName(user)}. They reset at midnight UTC.${lim.trusted ? '' : ' After your first week you get 10 a day.'}\nYour price watches keep running meanwhile.`);
     return false;
   }
-  await Promise.all([addUsage(env, key, 'searches'), bump(env, 'searches')]);
+  if (month >= monthAllowed) {
+    await bump(env, 'quota_blocked_month');
+    await send(env, chat.id, `You've used this month's ${monthAllowed} free searches, ${firstName(user)}. They come back on the 1st. Your price watches keep running meanwhile.`);
+    return false;
+  }
+  await Promise.all([addUsage(env, key, 'searches'), chat.personal ? null : bump(env, 'searches'), bump(env, mkey, 1, monthKey())]);
   return true;
 }
-
 const monthOf = (iso) => iso.slice(0, 7);
 
 // Builds one or two API queries plus date windows for flexible searches.
@@ -645,6 +678,7 @@ async function runSearch(env, user, chat, draft, isGroup) {
     isGroup ? {} : countryVisaMap(env, user.id),
     recordPrice(env, route, month, best, res.currency),
     isGroup ? null : noteInterest(env, user.id, draft),
+    isGroup ? null : recordSearch(env, user, draft),
   ]);
   const ctx = toolkitContext(draft, ranked[0].it);
   ctx.lateArrival = ranked.some((r) => r.late);
@@ -654,7 +688,7 @@ async function runSearch(env, user, chat, draft, isGroup) {
     formatResults(env, user, draft, ranked, res.currency, pax, stats, best, vmap),
     Promise.all(ranked.map((r) => trackedLink(env, bookingUrl(env, r.it), user.id, 'flight', {
       sid: searchId, origin: draft.origin, destination: draft.destination, depart: r.it.departure_at.slice(0, 10),
-      ret: r.it.return_at ? r.it.return_at.slice(0, 10) : null, adults: draft.adults, children: draft.children || 0 }))),
+      ret: r.it.return_at ? r.it.return_at.slice(0, 10) : null, adults: draft.adults, children: draft.children || 0, label: r.labels[0] }))),
     trackedLink(env, live, user.id, 'live'),
     toolkit(env, ctx, 1),
     gearButton(env, user, draft, ranked[0].it),
@@ -780,13 +814,13 @@ async function onCallback(env, cq) {
       return continueDraft(env, user, chat, draft, false);
     }
     if (a === 'cmp') return compareCountry(env, user, chat, draft, b);
-    if (a === 'm') { draft.depart = { type: 'month', value: b }; draft.flex = 'month'; delete draft.ret; return continueDraft(env, user, chat, draft, false); }
+    if (a === 'm' && /^20\d\d-(0[1-9]|1[0-2])$/.test(b || '')) { draft.depart = { type: 'month', value: b }; draft.flex = 'month'; delete draft.ret; return continueDraft(env, user, chat, draft, false); }
     if (a === 'flex' && ['exact', '3d', 'month'].includes(b)) { draft.flex = b; return continueDraft(env, user, chat, draft, false); }
     if (a === 'ad' && +b >= 1 && +b <= 9) { draft.adults = +b; draft.paxGuess = false; return continueDraft(env, user, chat, draft, false); }
     if (a === 'ch' && +b >= 0 && +b <= 8) { draft.children = +b; draft.paxGuess = false; return continueDraft(env, user, chat, draft, false); }
     if (a === 'mgo' && draft.multi) return startMulti(env, user, chat, draft, false);
     if (a === 'mchg' && draft.multi) return continueDraft(env, user, chat, draft, false);
-    if (a === 'mn' && draft.multi && +b >= 1 && +b <= 60) { draft.nights = +b; return continueDraft(env, user, chat, draft, false); }
+    if (a === 'mn' && draft.multi && +b >= 1 && +b <= 30) { draft.nights = +b; return continueDraft(env, user, chat, draft, false); }
     if (a === 'mrm' && draft.multi) {
       draft.multi = draft.multi.filter((c) => c !== b);
       if (draft.multi.length === 1) { draft.destination = draft.multi[0]; delete draft.multi; } else draft.destination = draft.multi[0];
@@ -1087,7 +1121,7 @@ async function emailPlan(env, user, chat, s) {
   const r = await sendEmail(env, user.email, mail.subject, mail.html, mail.text, { unsubUrl });
   if (!r.ok) return send(env, chat.id, r.reason === 'not_configured' ? 'Email sending isn’t switched on yet. Your plan is right here in the chat.' : 'I couldn’t send the email right now. Please try again later.');
   await addUsage(env, `u${user.id}`, 'emails');
-  await bump(env, `em_u${user.id}`, 1, monthKey());
+  await Promise.all([bump(env, `em_u${user.id}`, 1, monthKey()), recordEvent(env, user.id, 'emails')]);
   await cacheSet(env, `emd:${user.id}:${planSig(d)}`, nowSec(), 86400);
   await cacheSet(env, `emcd:${user.id}`, 1, Number(env.EMAIL_COOLDOWN_SEC || 120));
   return send(env, chat.id, `📧 Sent to ${esc(user.email)}. Check your inbox, ${firstName(user)}!\n<i>Not there in a minute? Look in Promotions or Spam and tap "Not spam", so the next one lands in your inbox.</i>`);
@@ -1104,11 +1138,22 @@ async function showToolkit(env, user, chat, s) {
 }
 
 async function startMulti(env, user, chat, draft, isGroup) {
-  if (!(await checkSearchQuota(env, user, chat, isGroup))) return null;
+  // one search per route: changing nights, group or dates of the same route is free
+  // (up to 6 free re-pricings per route; after that each one counts, so buttons can't be used to scrape)
+  const routeSig = [draft.origin, ...draft.multi].join('-');
+  draft.reprices = draft.countedSig === routeSig ? (draft.reprices || 0) + 1 : 0;
+  const counted = draft.countedSig !== routeSig || draft.reprices > 6;
+  if (counted) {
+    if (!(await checkSearchQuota(env, user, chat, isGroup))) return null;
+    draft.countedSig = routeSig;
+    draft.reprices = 0;
+  }
+  await saveDraft(env, user, draft, isGroup);
   const [out] = await Promise.all([
-    runMulti(env, user, chat, draft, { firstName: firstName(user), airline, trackedLink, gearButton, multiCityUrl }),
+    runMulti(env, user, chat, draft, { firstName: firstName(user), airline, trackedLink, gearButton, multiCityUrl, groupLabel, paxRows }),
     typing(env, chat.id),
     ...(isGroup ? [] : draft.multi.map((c) => noteInterest(env, user.id, { ...draft, destination: c }))),
+    isGroup || !counted ? null : recordSearch(env, user, draft),
   ]);
   return out;
 }

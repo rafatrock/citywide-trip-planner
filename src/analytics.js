@@ -6,6 +6,7 @@
 import { countersFor } from './db.js';
 import { countryName, flag } from './countries.js';
 import { placeByCode } from './places.js';
+import { audienceInsights } from './profile.js';
 import { PERSONAS } from './rank.js';
 import { emailCaps, monthKey } from './email.js';
 import { counter } from './db.js';
@@ -91,6 +92,9 @@ export async function analytics(env, now = Math.floor(Date.now() / 1000)) {
     '',
     '<b>Top destinations searched (30 days)</b>',
     dests.length ? dests.map((d) => `${placeByCode(d.k)?.name || d.k} ${d.n}`).join(' · ') : 'No data yet',
+    '',
+    '<b>How people search and choose</b>',
+    ...(await audienceInsights(env)),
     '',
     '<b>Path to booking (last 30 days)</b>',
     `Joined ${f.joined || 0} → finished setup ${f.setup || 0} → searched ${f.searched || 0} → tapped Book ${f.clicked || 0} → said they booked ${f.booked || 0}`,
