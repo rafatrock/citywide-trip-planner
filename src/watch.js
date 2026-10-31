@@ -36,7 +36,7 @@ export async function createWatch(env, user, chat, search, limits, isGroup) {
   }
   const owner = isGroup ? -chat.id : user.id; // group watches belong to the group
   const active = await env.DB.prepare('SELECT COUNT(*) AS n FROM watches WHERE user_id = ? AND active = 1').bind(owner).first();
-  const maxActive = Number(env.MAX_ACTIVE_WATCHES || 3);
+  const maxActive = limits.watches >= 99 ? 99 : Number(env.MAX_ACTIVE_WATCHES || 3); // owner: no cap
   if ((active?.n || 0) >= maxActive) {
     return send(env, chat.id, `You already have ${maxActive} active price watches. Remove one in /watches first.`);
   }

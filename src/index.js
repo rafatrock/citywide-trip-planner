@@ -5,7 +5,7 @@
 //   GET  /              health page
 // Cron: every 30 min checks trip watches; 03:00 UTC sends the daily report.
 
-import { ensureSchema, useLink, bump, setConfig, cleanup } from './db.js';
+import { ensureSchema, useLink, bump, setConfig, getConfig, cleanup } from './db.js';
 import { handleUpdate } from './bot.js';
 import { checkWatches } from './watch.js';
 import { dailyReport } from './admin.js';
@@ -41,6 +41,7 @@ async function setup(env, request) {
   const me = await tg(env, 'getMe', {});
   if (!me.ok) return html('<h2>Telegram token not accepted</h2><p>Check TELEGRAM_BOT_TOKEN (copy it again from @BotFather).</p>', 400);
   await setConfig(env, 'bot_username', me.result.username);
+  await refreshAirlines(env);
   // Telegram sometimes can't look up a workers.dev address for a few minutes: try 3 times.
   let hook;
   for (let i = 0; i < 3; i += 1) {
@@ -85,6 +86,25 @@ ${help}
 <p>Telegram's saved address: <code>${String(w.url || '(none)').replace(/[<>&]/g, '')}</code> · messages waiting: ${w.pending_update_count ?? '?'}</p>
 ${lastErr}
 <p>Database: ready.${hook.ok ? ' Open the bot in Telegram and send <b>/start</b>.' : ''}</p>`);
+}
+
+// Airline names for every code (free Travelpayouts data file), saved once a week.
+async function refreshAirlines(env) {
+  const at = Number(await getConfig(env, 'airlines_at')) || 0;
+  if (Date.now() - at < 7 * 86400000 && await getConfig(env, 'airlines')) return;
+  try {
+    const res = await fetch('https://api.travelpayouts.com/data/en/airlines.json', { signal: AbortSignal.timeout(10000) });
+    const list = await res.json();
+    const map = {};
+    for (const a of Array.isArray(list) ? list : []) {
+      const name = a?.name_translations?.en || a?.name;
+      if (a?.code && /^[A-Z0-9]{2}$/.test(a.code) && name && !map[a.code]) map[a.code] = String(name).slice(0, 40);
+    }
+    if (Object.keys(map).length > 100) {
+      await setConfig(env, 'airlines', JSON.stringify(map));
+      await setConfig(env, 'airlines_at', Date.now());
+    }
+  } catch (e) { console.log('airline list failed', e && e.message); }
 }
 
 // Each message or cron run gets its own copy of env with a call budget (free plan: 50).
@@ -169,6 +189,7 @@ export default {
           await tripReminders(env);
           await askBooked(env);
           await cleanup(env);
+          await refreshAirlines(env);
         } else {
           await checkWatches(env);
           await weeklyDigest(env);

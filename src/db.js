@@ -37,8 +37,15 @@ const V2_COLUMNS = [
 ];
 
 const ready = new WeakSet(); // per database binding, once per Worker instance
+// Bump this when the schema changes. A fresh Worker instance checks one row instead of
+// re-running ~30 statements (that made the first message after a quiet spell slow).
+const SCHEMA_VERSION = '4.3';
 export async function ensureSchema(env) {
   if (ready.has(env.DB)) return;
+  try {
+    const v = await env.DB.prepare("SELECT value FROM config WHERE key = 'schema_version'").first();
+    if (v && v.value === SCHEMA_VERSION) { ready.add(env.DB); return; }
+  } catch { /* first run: config table not there yet */ }
   await env.DB.batch(SCHEMA.map((s) => env.DB.prepare(s)));
   for (const col of V2_COLUMNS) {
     try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN ${col}`).run(); } catch { /* already there */ }
@@ -55,6 +62,7 @@ export async function ensureSchema(env) {
   await env.DB.batch([
     env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (email) WHERE email IS NOT NULL'),
     env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users (phone) WHERE phone IS NOT NULL'),
+    env.DB.prepare("INSERT INTO config (key, value) VALUES ('schema_version', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").bind(SCHEMA_VERSION),
   ]);
   ready.add(env.DB);
 }
@@ -175,12 +183,21 @@ export async function cacheSet(env, key, value, ttlSec) {
 }
 
 // ---------- settings saved by /setup (public URL, bot username) ----------
+// Settings rarely change, so each Worker instance remembers them for 10 minutes.
+const CONFIG_MEMO = new WeakMap();
 export async function getConfig(env, key) {
+  let memo = CONFIG_MEMO.get(env.DB);
+  if (!memo) { memo = new Map(); CONFIG_MEMO.set(env.DB, memo); }
+  const hit = memo.get(key);
+  if (hit && hit.at > Date.now() - 600000) return hit.value;
   const row = await env.DB.prepare('SELECT value FROM config WHERE key = ?').bind(key).first();
-  return row ? row.value : null;
+  const value = row ? row.value : null;
+  memo.set(key, { value, at: Date.now() });
+  return value;
 }
 
 export async function setConfig(env, key, value) {
+  CONFIG_MEMO.get(env.DB)?.delete(key);
   await env.DB.prepare('INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value')
     .bind(key, String(value)).run();
 }

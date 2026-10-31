@@ -4,7 +4,7 @@
 export const PERSONAS = {
   family: { label: 'Family with kids', price: 1.0, stops: 0.6, duration: 0.5, lateArrival: 0.9, earlyDeparture: 0.6, maxStops: 1 },
   friends: { label: 'Friends group', price: 2.0, stops: 0.3, duration: 0.3, lateArrival: 0.25, earlyDeparture: 0.2, maxStops: 2 },
-  backpacker: { label: 'Solo / budget', price: 4.0, stops: 0.15, duration: 0.15, lateArrival: 0.1, earlyDeparture: 0.05, maxStops: 3 },
+  backpacker: { label: 'Backpacker / budget', price: 4.0, stops: 0.15, duration: 0.15, lateArrival: 0.1, earlyDeparture: 0.05, maxStops: 3 },
   women: { label: "Women's group", price: 1.0, stops: 0.4, duration: 0.3, lateArrival: 1.1, earlyDeparture: 0.3, maxStops: 2 },
   couple: { label: 'Couple', price: 1.0, stops: 0.4, duration: 0.4, lateArrival: 0.4, earlyDeparture: 0.3, maxStops: 2 },
   corporate: { label: 'Business trip', price: 0.5, stops: 0.9, duration: 0.8, lateArrival: 0.3, earlyDeparture: 0.4, maxStops: 1 },

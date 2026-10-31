@@ -11,7 +11,7 @@ import { parseTrip, missingField, addDays } from './parse.js';
 import { aiParse } from './ai.js';
 import { placeByCode, resolvePlace, POPULAR_FROM, PLACES } from './places.js';
 import { citiesIn, countryName } from './countries.js';
-import { searchFares, bookingUrl, liveSearchUrl } from './tp.js';
+import { searchFares, bookingUrl, liveSearchUrl, multiCityUrl } from './tp.js';
 import { rankFares, cheapestDates, PERSONAS, localParts, arrivalLocal } from './rank.js';
 import { handleAdmin, isAdmin } from './admin.js';
 import { createWatch, listWatches, stopWatch } from './watch.js';
@@ -45,11 +45,18 @@ const AIRLINES = {
   AA: 'American', DL: 'Delta', UA: 'United', B6: 'JetBlue', WN: 'Southwest', NK: 'Spirit', AC: 'Air Canada',
   WS: 'WestJet', QF: 'Qantas', VA: 'Virgin Australia', JQ: 'Jetstar', NZ: 'Air New Zealand', PK: 'PIA',
   HY: 'Uzbekistan Airways', KC: 'Air Astana', DV: 'SCAT', T5: 'Turkmenistan Airlines', QH: 'Air Kyrgyzstan', J2: 'AZAL',
-  A9: 'Georgian Airways', SZ: 'Somon Air', '5W': 'Wizz Air Abu Dhabi', XY: 'flynas', F3: 'flyadeal', MS: 'EgyptAir', RJ: 'Royal Jordanian',
+  A9: 'Georgian Airways', C6: 'Centrum Air', SZ: 'Somon Air', '5W': 'Wizz Air Abu Dhabi', XY: 'flynas', F3: 'flyadeal', MS: 'EgyptAir', RJ: 'Royal Jordanian',
   J9: 'Jazeera Airways', GF: 'Gulf Air', KU: 'Kuwait Airways', OV: 'SalamAir', PC: 'Pegasus', XQ: 'SunExpress',
   SU: 'Aeroflot', S7: 'S7 Airlines', ET: 'Ethiopian', KQ: 'Kenya Airways', '3K': 'Jetstar Asia', VZ: 'Thai Vietjet', DD: 'Nok Air', SL: 'Thai Lion Air',
 };
-const airline = (c) => AIRLINES[c] || c || 'Airline';
+// Full airline list (Travelpayouts' free data file, refreshed daily by the 03:00 job); the map above wins.
+let MORE_AIRLINES = {};
+let MORE_RAW = null;
+export async function loadAirlineNames(env) {
+  const raw = await getConfig(env, 'airlines');
+  if (raw && raw !== MORE_RAW) { try { MORE_AIRLINES = JSON.parse(raw); MORE_RAW = raw; } catch { /* keep the old list */ } }
+}
+const airline = (c) => AIRLINES[c] || MORE_AIRLINES[c] || c || 'Airline';
 const LABEL_ICON = { 'Best overall': '⭐', Cheapest: '💰', 'Most comfortable': '🛋️', 'Also good': '👍' };
 
 const fmtDur = (min) => (min ? `${Math.floor(min / 60)}h ${String(min % 60).padStart(2, '0')}m` : '');
@@ -86,6 +93,7 @@ let ENV = {};
 const DEFAULTS = { NEW_SEARCHES_PER_DAY: 5, NEW_WATCHES_PER_DAY: 1, TRUSTED_SEARCHES_PER_DAY: 10, TRUSTED_WATCHES_PER_DAY: 2 };
 const setting = (k) => ENV[k] ?? DEFAULTS[k];
 function limitsFor(user) {
+  if (user && isAdmin(ENV, user.id)) return { searches: 9999, watches: 99, trusted: true }; // you, the owner: no limits
   const trusted = user && nowSec() - (user.created_at || 0) > 7 * 86400 && (user.active_days || 0) >= 2;
   return {
     searches: Number(trusted ? setting('TRUSTED_SEARCHES_PER_DAY') : setting('NEW_SEARCHES_PER_DAY')),
@@ -99,6 +107,7 @@ const ALWAYS_OK = ['/start', '/help', '/privacy', '/delete', '/whoami', '/about'
 
 export async function handleUpdate(env, update) {
   ENV = env;
+  await loadAirlineNames(env);
   if (update.callback_query) return onCallback(env, update.callback_query);
   const msg = update.message;
   if (!msg || !msg.from || msg.from.is_bot) return;
@@ -144,8 +153,67 @@ export async function handleUpdate(env, update) {
     return onSetupText(env, user, chat, text, msg);
   }
   if (cmd) return onCommand(env, user, chat, text, isGroup);
+  if (!isGroup && await onDraftReply(env, user, chat, text)) return;
   if (await smallTalk(env, user, chat, text)) return;
   return onTripText(env, user, chat, text, isGroup);
+}
+
+// ---------- replies to an open trip card ----------
+// While a "Here's what I understood" card is open, short messages change that trip
+// ("1 adult only", "one way", "15 to 20 Jan", "flexible") or run it ("go", "search").
+// A message naming a new destination starts a new trip instead.
+const GO = /^(go|go ahead|search|search now|yes|yep|yeah|ok(ay)?,? go|ok(ay)?,? search|find|find (it|them|flights)|let'?s go|proceed|do it|price (it|this|the route|route)|show me|confirm|done)[!. ]*$/i;
+
+export function editDraft(prev, text, opts) {
+  const t = ` ${text} `;
+  const again = parseTrip(text, opts);
+  const newPlace = (again.destination && again.destination !== prev.destination && !(prev.multi || []).includes(again.destination))
+    || (again.multi && again.multi.join() !== (prev.multi || []).join()) || (again.destCountry && !prev.multi);
+  if (newPlace) return null;
+  const d = { ...prev };
+  let changed = false;
+  const set = (k, v) => { if (JSON.stringify(d[k]) !== JSON.stringify(v)) { d[k] = v; changed = true; } };
+  if (/\b(just me|only me|myself|alone|solo)\b/i.test(t)) { set('adults', 1); set('children', 0); }
+  if (again.adults !== undefined) set('adults', again.adults);
+  if (again.children !== undefined) set('children', again.children);
+  else if (again.adults !== undefined && /\bonly\b/i.test(t)) set('children', 0); // "2 adults only"
+  if (again.adults !== undefined || again.children !== undefined || /\b(just me|only me|myself|alone|solo)\b/i.test(t)) {
+    delete d.paxGuess;
+    if (!d.children && d.persona === 'family') { d.persona = d.adults === 1 ? null : d.adults === 2 ? 'couple' : 'friends'; changed = true; }
+    if (d.adults === 1 && !d.children && ['couple', 'friends', 'women'].includes(d.persona)) { d.persona = null; changed = true; }
+  }
+  if (again.persona && again.persona !== 'family' && again.persona !== prev.persona) set('persona', again.persona);
+  if (again.depart) {
+    set('depart', again.depart);
+    if (again.ret) set('ret', again.ret); else if (prev.ret && again.depart.value > prev.ret.value) { delete d.ret; changed = true; }
+    set('flex', again.flex || (again.depart.type === 'month' ? 'month' : 'exact'));
+    if (prev.multi && again.ret) set('nights', Math.round((Date.parse(again.ret.value) - Date.parse(again.depart.value)) / 86400000));
+  } else if (again.flex) set('flex', again.flex);
+  if (/\b(exact|fixed)\s+(dates?|days?)\b|\bexactly\b/i.test(t)) set('flex', 'exact');
+  if (/\b(any day|whole month|any date|anytime that month)\b/i.test(t) && d.depart) set('flex', 'month');
+  if (again.oneWay) set('oneWay', true);
+  if (/\b(return|round[- ]?trip|both ways|coming back)\b/i.test(t) && !again.oneWay) set('oneWay', false);
+  if (again.direct) set('direct', true);
+  if (/\b(any stops|connections? (are )?(ok|fine)|with stops?)\b/i.test(t)) set('direct', false);
+  if (again.budget) set('budget', { ...again.budget, currency: again.budget.currency || opts.currency });
+  if (again.nights && !again.depart) set('nights', again.nights);
+  return changed ? d : null;
+}
+
+async function onDraftReply(env, user, chat, text) {
+  if (!user.draft) return false;
+  let prev;
+  try { prev = JSON.parse(user.draft); } catch { return false; }
+  if (!prev || prev.awaiting || !prev.destination || !prev.depart) return false;
+  if (GO.test(text.trim())) {
+    if (prev.multi) return startMulti(env, user, chat, prev, false).then(() => true);
+    return runSearch(env, user, chat, prev, false).then(() => true);
+  }
+  const d = editDraft(prev, text, { now: new Date(), home: user.home, currency: user.currency || 'usd' });
+  if (!d) return false;
+  d.justUpdated = true;
+  await continueDraft(env, user, chat, d, false);
+  return true;
 }
 
 // Friendly replies that don't cost a search. Always honest about being an AI.
@@ -303,6 +371,8 @@ async function saveDraft(env, user, draft, isGroup) {
 }
 
 async function continueDraft(env, user, chat, draft, isGroup) {
+  const pre = draft.justUpdated ? 'Updated ✅ ' : '';
+  delete draft.justUpdated;
   const missing = missingField(draft);
   if (missing === 'city') {
     draft.awaiting = 'destination';
@@ -334,13 +404,24 @@ async function continueDraft(env, user, chat, draft, isGroup) {
     const vm = await countryVisaMap(env, user.id);
     const kb = multiKeyboard(draft);
     if (draft.paxGuess) kb.splice(1, 0, ...paxRows(draft));
-    return send(env, chat.id, multiSummary(user, draft, vm, firstName(user)) + (draft.paxGuess ? '\n\n👥 How many are going? (my guess is above; tap to change)' : ''), kb);
+    return send(env, chat.id, pre + multiSummary(user, draft, vm, firstName(user), groupLabel) + (draft.paxGuess ? '\n\n👥 How many are going? (my guess is above; tap to change)' : ''), kb);
   }
   if (isGroup) return runSearch(env, user, chat, draft, isGroup);
   const vmap = await countryVisaMap(env, user.id);
   const destCc = placeByCode(draft.destination)?.cc;
   const askVisa = shouldAskVisa(list(user.passports), list(user.visas), destCc, vmap) ? destCc : null;
-  return send(env, chat.id, summary(env, user, draft, vmap, askVisa), confirmKeyboard(draft, askVisa));
+  return send(env, chat.id, pre + summary(env, user, draft, vmap, askVisa), confirmKeyboard(draft, askVisa));
+}
+
+// The label must match the people: no "Family with kids · 1 person".
+export function groupLabel(d) {
+  const pax = (d.adults || 1) + (d.children || 0);
+  const p = d.persona;
+  const fits = p && !(p === 'family' && !d.children) && !(p === 'couple' && pax !== 2) && !(['friends', 'women'].includes(p) && pax < 2);
+  if (fits) return PERSONAS[p].label;
+  if (pax === 1) return 'Solo';
+  if (d.children) return 'Family with kids';
+  return pax === 2 ? 'Two travellers' : `${pax} travellers`;
 }
 
 const STAYS = { short: [2, 4, '2–4 nights'], week: [5, 7, '5–7 nights'], long: [8, 14, '8–14 nights'] };
@@ -371,8 +452,8 @@ function confirmKeyboard(d, askVisa) {
 
 function summary(env, user, d, vmap = {}, askVisa = null) {
   const pax = (d.adults || 1) + (d.children || 0);
-  const who = d.persona ? PERSONAS[d.persona].label : (pax === 1 ? 'Solo' : `${pax} travellers`);
-  const people = d.children ? `${d.adults} adults, ${d.children} children` : `${pax} ${pax === 1 ? 'person' : 'people'}`;
+  const who = groupLabel(d);
+  const people = d.children ? `${d.adults} adult${d.adults === 1 ? '' : 's'}, ${d.children} ${d.children === 1 ? 'child' : 'children'}` : `${pax} ${pax === 1 ? 'person' : 'people'}`;
   let when;
   if (d.depart.type === 'month' || d.flex === 'month') {
     when = `${fmtMonth(d.depart.value.slice(0, 7))} (any days)`;
@@ -414,8 +495,7 @@ async function checkSearchQuota(env, user, chat, isGroup) {
     await send(env, chat.id, `You've used today's ${allowed} free searches, ${firstName(user)}. They reset at midnight UTC.${lim.trusted ? '' : ' Regular users get more after their first week.'}\nYour price watches keep running meanwhile.`);
     return false;
   }
-  await addUsage(env, key, 'searches');
-  await bump(env, 'searches');
+  await Promise.all([addUsage(env, key, 'searches'), bump(env, 'searches')]);
   return true;
 }
 
@@ -449,18 +529,31 @@ export function fareQueries(draft, user) {
   return { queries: [{ ...base, depart: dep, ret }], windows: {} };
 }
 
+async function fetchQuery(env, q) {
+  let res = await searchFares(env, q);
+  // a whole-month round trip that returns next month (e.g. 25 Jan → 3 Feb)
+  if (!res.capped && !res.items.length && !q.oneWay && q.ret && q.ret.length === 7 && q.ret === monthOf(q.depart)) {
+    const [y, m] = q.ret.split('-').map(Number);
+    const next = new Date(Date.UTC(y, m, 1));
+    res = await searchFares(env, { ...q, ret: `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}` });
+  }
+  return res;
+}
+
 export async function fetchRanked(env, draft, user) {
-  const { queries, windows } = fareQueries(draft, user);
+  let { queries, windows } = fareQueries(draft, user);
+  let results = await Promise.all(queries.map((q) => fetchQuery(env, q))); // all at once: faster
+  let nearby = false;
+  // exact dates with no recent price: look ± 3 days and say so, rather than "nothing found"
+  if (draft.flex === 'exact' && draft.depart.type === 'date' && !results.some((r) => r.items.length || r.capped)) {
+    ({ queries, windows } = fareQueries({ ...draft, flex: '3d' }, user));
+    results = await Promise.all(queries.map((q) => fetchQuery(env, q)));
+    nearby = results.some((r) => r.items.length);
+  }
   let items = [];
   let currency = (user.currency || 'usd').toLowerCase();
   let capped = false;
-  for (const q of queries) {
-    let res = await searchFares(env, q);
-    if (!res.capped && !res.items.length && !q.oneWay && q.ret && q.ret.length === 7 && q.ret === monthOf(q.depart)) {
-      const [y, m] = q.ret.split('-').map(Number);
-      const next = new Date(Date.UTC(y, m, 1));
-      res = await searchFares(env, { ...q, ret: `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}` });
-    }
+  for (const res of results) {
     if (res.capped) capped = true;
     if (res.items.length) {
       if (items.length && res.currency !== currency) continue; // keep one currency per answer
@@ -474,13 +567,12 @@ export async function fetchRanked(env, draft, user) {
     currency, destTz: dest?.tz, avoidNight: draft.avoidNight, nights: draft.nights, oneWay: draft.oneWay, ...windows,
     stayRange: !draft.oneWay && !draft.nights && STAYS[draft.stay] ? STAYS[draft.stay].slice(0, 2) : null,
   }) : [];
-  return { res: { items, currency, capped }, ranked, q: queries[0] };
+  return { res: { items, currency, capped, nearby }, ranked, q: queries[0] };
 }
 
 async function runSearch(env, user, chat, draft, isGroup) {
   if (!(await checkSearchQuota(env, user, chat, isGroup))) return;
-  await typing(env, chat.id);
-  const { res, ranked, q } = await fetchRanked(env, draft, user);
+  const [{ res, ranked, q }] = await Promise.all([fetchRanked(env, draft, user), typing(env, chat.id)]);
   if (res.capped && !ranked.length) return send(env, chat.id, "I'm very busy today and paused new price checks to stay free for everyone. Please try again tomorrow, sorry!");
 
   const pax = (draft.adults || 1) + (draft.children || 0);
@@ -498,28 +590,36 @@ async function runSearch(env, user, chat, draft, isGroup) {
   const best = Math.min(...ranked.map((r) => r.it.price));
   const route = `${draft.origin}-${draft.destination}`;
   const month = draft.depart.value.slice(0, 7);
-  const stats = await priceStats(env, route, month, res.currency);
-  await recordPrice(env, route, month, best, res.currency);
-  const searchId = await saveSearch(env, user.id, chat.id, { draft, best, currency: res.currency });
-
-  if (!isGroup) await noteInterest(env, user.id, draft);
-  const vmap = isGroup ? {} : await countryVisaMap(env, user.id);
-  const msg = await formatResults(env, user, draft, ranked, res.currency, pax, stats, best, vmap);
+  // independent steps run side by side (each database trip costs time)
+  const [stats, searchId, vmap] = await Promise.all([
+    priceStats(env, route, month, res.currency),
+    saveSearch(env, user.id, chat.id, { draft, best, currency: res.currency }),
+    isGroup ? {} : countryVisaMap(env, user.id),
+    recordPrice(env, route, month, best, res.currency),
+    isGroup ? null : noteInterest(env, user.id, draft),
+  ]);
+  const ctx = toolkitContext(draft, ranked[0].it);
+  ctx.lateArrival = ranked.some((r) => r.late);
+  const live = liveSearchUrl(env, { origin: draft.origin, destination: draft.destination, depart: ranked[0].it.departure_at.slice(0, 10),
+    ret: draft.oneWay || !ranked[0].it.return_at ? undefined : ranked[0].it.return_at.slice(0, 10), adults: draft.adults });
+  const [msg, hrefs, liveHref, extras, gear] = await Promise.all([
+    formatResults(env, user, draft, ranked, res.currency, pax, stats, best, vmap),
+    Promise.all(ranked.map((r) => trackedLink(env, bookingUrl(env, r.it), user.id, 'flight', {
+      sid: searchId, origin: draft.origin, destination: draft.destination, depart: r.it.departure_at.slice(0, 10),
+      ret: r.it.return_at ? r.it.return_at.slice(0, 10) : null, adults: draft.adults, children: draft.children || 0 }))),
+    trackedLink(env, live, user.id, 'live'),
+    toolkit(env, ctx, 1),
+    gearButton(env, user, draft, ranked[0].it),
+  ]);
   const keyboard = [];
-  let shareHref = null;
-  for (const r of ranked) {
-    const meta = { sid: searchId, origin: draft.origin, destination: draft.destination, depart: r.it.departure_at.slice(0, 10),
-      ret: r.it.return_at ? r.it.return_at.slice(0, 10) : null, adults: draft.adults, children: draft.children || 0 };
-    const href = await trackedLink(env, bookingUrl(env, r.it), user.id, 'flight', meta);
-    if (href) keyboard.push([url(`${LABEL_ICON[r.labels[0]]} ${airline(r.it.airline)} · ${money(r.it.price, res.currency)} · Book`, href)]);
-    if (!shareHref && href) shareHref = href;
-  }
+  ranked.forEach((r, i) => {
+    if (hrefs[i]) keyboard.push([url(`${LABEL_ICON[r.labels[0]]} ${airline(r.it.airline)} · ${money(r.it.price, res.currency)} · Book`, hrefs[i])]);
+  });
+  const shareHref = hrefs.find(Boolean) || null;
   keyboard.push([btn('🔔 Track this trip', `r:w:${searchId}`), btn('📅 Cheaper dates', `r:dates:${searchId}`)]);
   const v = visaFor(list(user.passports), list(user.visas), placeByCode(draft.destination)?.cc, yesCountries(vmap));
   keyboard.push([btn(needsEmbassy(v) ? '🌏 Easier places' : '🌏 Similar places', `r:alt:${searchId}`), btn('✏️ Change', 'd:grp')]);
-  const live = liveSearchUrl(env, { origin: draft.origin, destination: draft.destination, depart: ranked[0].it.departure_at.slice(0, 10),
-    ret: draft.oneWay || !ranked[0].it.return_at ? undefined : ranked[0].it.return_at.slice(0, 10), adults: draft.adults });
-  keyboard.push([url('🔎 All live prices, incl. connecting flights', await trackedLink(env, live, user.id, 'live'))]);
+  keyboard.push([url('🔎 All live prices, incl. connecting flights', liveHref)]);
   const second = [];
   if (env.TP_TRS) second.push(btn('🧳 Trip toolkit', `r:tk:${searchId}`));
   const top = ranked[0].it;
@@ -527,14 +627,10 @@ async function runSearch(env, user, chat, draft, isGroup) {
   second.push(url('📤 Share on WhatsApp', `https://wa.me/?text=${encodeURIComponent(shareText)}`));
   keyboard.push(second);
   if (!isGroup && user.email && emailReady(env)) keyboard.push([btn('📧 Email me this plan', `r:em:${searchId}`)]);
-  // one money-making extra that fits this trip (only programs you've joined)
-  const ctx = toolkitContext(draft, ranked[0].it);
-  ctx.lateArrival = ranked.some((r) => r.late);
-  const extra = (await toolkit(env, ctx, 1))[0];
-  if (extra) keyboard.push([url(extra.text, extra.href)]);
-  const gear = await gearButton(env, user, draft, ranked[0].it);
+  if (extras[0]) keyboard.push([url(extras[0].text, extras[0].href)]); // one fitting extra (programs you've joined)
   if (gear) keyboard.push([gear]);
-  return send(env, chat.id, msg, keyboard);
+  const note = res.nearby ? `<i>No recent prices on your exact dates, so these are the nearest days (± 3). Tap 🔎 to check your exact dates live.</i>\n\n` : '';
+  return send(env, chat.id, note + msg, keyboard);
 }
 
 // One option, carrier first, laid out like an e-ticket.
@@ -576,12 +672,14 @@ async function formatResults(env, user, draft, ranked, cur, pax, stats, best, vm
     const low = Math.min(...ranked.map((r) => r.it.price));
     out.push(`💡 All of these are above your budget of ${money(ranked[0].perPersonBudget, cur)} per person (cheapest is ${money(low, cur)}). Try 📅 Cheaper dates or another month, tap 🔔 and I'll tell you if it drops, or tap 🔎 to see all live prices including connections.`);
   }
-  const w = await weatherLine(env, draft.origin, draft.destination, ranked[0].it.departure_at.slice(0, 7));
-  if (w) out.push(esc(w.line));
   const destCc = placeByCode(draft.destination)?.cc;
+  const [w, news] = await Promise.all([
+    weatherLine(env, draft.origin, draft.destination, ranked[0].it.departure_at.slice(0, 7)),
+    latestNewsFor(env, destCc),
+  ]);
+  if (w) out.push(esc(w.line));
   const vl = visaLine(visaFor(list(user.passports), list(user.visas), destCc, yesCountries(vmap)), destCc);
   if (vl) out.push(vl);
-  const news = await latestNewsFor(env, destCc);
   if (news) out.push(newsLine(news, countryName(destCc), esc));
   if (user.country === 'BD') {
     out.push('💳 Paying from Bangladesh: airlines\' own Bangladesh websites take dual-currency cards with no $300 limit. Paying in taka (bKash, Nagad, local card)? Compare the same dates on <a href="https://www.gozayaan.com">GoZayaan</a> or <a href="https://sharetrip.net">ShareTrip</a>.');
@@ -609,9 +707,9 @@ async function onCallback(env, cq) {
       if (!success) return answer(env, cq.id, 'Slow down a little 🙂');
     } catch { /* ignore */ }
   }
-  const user = await touchUser(env, cq.from, isGroup ? null : chat.id);
-  if (user.banned) return answer(env, cq.id);
-  await answer(env, cq.id);
+  // stop the button's spinner while we load the user (side by side: faster)
+  const [user] = await Promise.all([touchUser(env, cq.from, isGroup ? null : chat.id), answer(env, cq.id)]);
+  if (user.banned) return null;
   const [ns, a, b] = data.split(':');
 
   if (ns === 'set') {
@@ -959,9 +1057,12 @@ async function showToolkit(env, user, chat, s) {
 
 async function startMulti(env, user, chat, draft, isGroup) {
   if (!(await checkSearchQuota(env, user, chat, isGroup))) return null;
-  await typing(env, chat.id);
-  if (!isGroup) for (const c of draft.multi) await noteInterest(env, user.id, { ...draft, destination: c });
-  return runMulti(env, user, chat, draft, { firstName: firstName(user), airline, trackedLink, gearButton });
+  const [out] = await Promise.all([
+    runMulti(env, user, chat, draft, { firstName: firstName(user), airline, trackedLink, gearButton, multiCityUrl }),
+    typing(env, chat.id),
+    ...(isGroup ? [] : draft.multi.map((c) => noteInterest(env, user.id, { ...draft, destination: c }))),
+  ]);
+  return out;
 }
 
 // "🎒 Pack: Universal travel adapter · Reef-safe sunscreen" → your /gear page (Amazon links live there).

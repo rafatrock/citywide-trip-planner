@@ -83,6 +83,12 @@ export function installFetch() {
       const result = method === 'getMe' ? { username: 'CityWideTripPlannerBot' } : { message_id: log.telegram.length };
       return new Response(JSON.stringify({ ok: true, result }));
     }
+    if (u.hostname === 'api.travelpayouts.com' && u.pathname === '/data/en/airlines.json') {
+      const list = Array.from({ length: 120 }, (_, i) => ({ code: `Z${String.fromCharCode(65 + (i % 26))}${i}`.slice(0, 2) + i, name: `Air ${i}` }))
+        .concat([{ code: 'C6', name: 'Centrum Air', name_translations: { en: 'Centrum Air' } }, { code: 'XJ', name: 'Thai AirAsia X' }])
+        .concat(Array.from({ length: 150 }, (_, i) => ({ code: `${String.fromCharCode(65 + (i % 26))}${i % 10}`, name: `Carrier ${i}` })));
+      return new Response(JSON.stringify(list));
+    }
     if (u.hostname === 'api.travelpayouts.com' && u.pathname.includes('prices_for_dates')) {
       log.tp.push(Object.fromEntries(u.searchParams));
       return new Response(JSON.stringify({ success: true, currency: u.searchParams.get('currency'), data: fixture(u.searchParams) }));

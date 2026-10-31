@@ -130,6 +130,7 @@ function parseTravellers(t) {
   if ((m = t.match(new RegExp(`\\b${N}\\s*(?:adults?|grown[- ]?ups?)`, 'i')))) r.adults = num(m[1].toLowerCase());
   if ((m = t.match(new RegExp(`\\b${N}\\s*(?:kids?|children|child|babies|baby|infants?|toddlers?)`, 'i')))) r.children = num(m[1].toLowerCase());
   else if (/\b(a|one|our)\s+(kid|child|baby|son|daughter|toddler)\b/i.test(t)) r.children = 1;
+  if (NO_KIDS.test(t)) r.children = 0; // "1 adult only, no children"
   if ((m = t.match(new RegExp(`\\bfamily of\\s*${N}`, 'i')))) {
     const total = num(m[1].toLowerCase());
     if (!r.adults && !r.children) { r.adults = Math.min(2, total); r.children = Math.max(0, total - 2); }
@@ -153,7 +154,9 @@ function parseTravellers(t) {
   return r;
 }
 
-export function detectPersona(t) {
+const NO_KIDS = /\b(no|without|zero|0)\s+(kids?|children|child|babies|baby|infants?)\b|\badults? only\b|\bonly adults?\b/i;
+export function detectPersona(raw) {
+  const t = String(raw).replace(new RegExp(NO_KIDS.source, 'gi'), ' ');
   if (/\b(backpack\w*)\b/i.test(t)) return 'backpacker';
   if (/\b(kids?|children|child|baby|toddler|infant|family|son|daughter|parents)\b/i.test(t)) return 'family';
   if (/\b(girls|ladies|women|female|sisters|girlfriends|hen)\b/i.test(t)) return 'women';

@@ -42,7 +42,7 @@ test('the screenshot: a 3-country backpacker trip works, no loop', async () => {
   assert.match(card.body.text, /Tashkent/);
   assert.match(card.body.text, /Bishkek/);
   assert.match(card.body.text, /Ashgabat/);
-  assert.match(card.body.text, /Solo \/ budget · 3 people/);
+  assert.match(card.body.text, /Backpacker \/ budget · 3 people/);
   assert.match(card.body.text, /6 nights in total/);
   assert.match(card.body.text, /is tight/);
   assert.match(card.body.text, /Visas for your passport/);
@@ -55,9 +55,19 @@ test('the screenshot: a 3-country backpacker trip works, no loop', async () => {
   assert.match(res.body.text, /Here's your route, Rafat/);
   assert.match(res.body.text, /Dhaka → /);
   assert.match(res.body.text, /Short hop: buses or shared taxis/);
-  assert.match(res.body.text, /Flights found: about/);
+  assert.match(res.body.text, /Priced flights: about/);
+  assert.match(res.body.text, /Best way to book:/);
   assert.ok(buttons(res).some((b) => /^1\) Uzbekistan Airways · Dhaka → .* · Book$/.test(b.text)));
-  assert.ok(buttons(res).some((b) => /^🔎 Live prices, leg/.test(b.text)));
+  const whole = buttons(res).find((b) => b.text.startsWith('🔎 Whole route as one ticket'));
+  assert.ok(whole, 'one multi-city search for the whole route');
+  const go = whole.url.split('/go/')[1];
+  const target = env.DB.raw.prepare('SELECT url FROM links WHERE id = ?').get(go).url;
+  assert.match(decodeURIComponent(target), /^https:\/\/search\.aviasales\.com\/flights\/\?segments\[0\]\[origin_iata\]=DAC&segments\[0\]\[destination_iata\]=/);
+  assert.match(decodeURIComponent(target), /segments\[3\]\[destination_iata\]=DAC/);
+  assert.match(target, /adults=3/);
+  // each stay keeps its nights: leg dates never squeeze a stop to zero nights
+  const dates = [...decodeURIComponent(target).matchAll(/depart_date\]=(\d{4}-\d\d-\d\d)/g)].map((m) => m[1]);
+  for (let i = 1; i < dates.length; i += 1) assert.ok(dates[i] > dates[i - 1], `leg ${i + 1} after leg ${i}: ${dates}`);
   assert.ok(buttons(res).some((b) => b.text?.startsWith('🎒 Pack:')), 'packing picks for a cold trip');
   assert.ok(log.tp.some((q) => q.origin === 'FRU' || q.destination === 'FRU'), 'Bishkek retried with its old code FRU');
 });
@@ -71,6 +81,7 @@ test('answering "Where to?" with countries or unknown places never loops', async
   await post(env, privateMsg('Uzbekistan, Kyrgyzstan and Turkmenistan', U));
   assert.match(lastText(log), /multi-country trip/);
   assert.match(lastText(log), /3 people/, 'kept the group from the first message');
+  await post(env, privateMsg('/plan', U)); // a fresh trip (with a card open, this message would edit it)
   await post(env, privateMsg('Me and 2 friends in January', U));
   await post(env, privateMsg('Xqzzyland', U));
   assert.match(lastText(log), /couldn't find "Xqzzyland"/);
@@ -87,7 +98,7 @@ test('family with no head count: Maya guesses 2 adults + 1 child and asks', asyn
   await onboard(env);
   await post(env, privateMsg('family trip to Bangkok in December', U));
   let t = lastText(log);
-  assert.match(t, /Family with kids · 2 adults, 1 children <i>\(my guess/);
+  assert.match(t, /Family with kids · 2 adults, 1 child <i>\(my guess/);
   assert.ok(buttons(lastSent(log)).some((b) => b.callback_data === 'd:ad:3'));
   await post(env, tap('d:ch:2', U, C));
   t = lastText(log);
