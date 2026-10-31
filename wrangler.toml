@@ -1,0 +1,66 @@
+# CityWide Trip Planner — Cloudflare Worker configuration.
+# You only ever edit ONE line here: database_id (see README, step 3).
+# Everything secret (tokens, IDs) goes in the Cloudflare dashboard, never in this file.
+
+name = "citywide-trip-planner"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+# Keep variables you add in the dashboard when GitHub deploys a new version.
+keep_vars = true
+
+[observability]
+enabled = true
+
+# Workers AI (free: 10,000 Neurons per day). Used only to understand messy sentences.
+[ai]
+binding = "AI"
+
+# D1 database. Create it in the dashboard, then paste its ID below (README step 3).
+[[d1_databases]]
+binding = "DB"
+database_name = "citywide_trip"
+database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"
+
+# Burst limit: at most 10 messages per user per minute.
+[[ratelimits]]
+name = "BURST"
+namespace_id = "2001"
+simple = { limit = 10, period = 60 }
+
+# Every 30 min: check a small batch of trip watches. 03:00 UTC = 09:00 Dhaka: daily report.
+[triggers]
+crons = ["*/30 * * * *", "0 3 * * *"]
+
+# Safe-to-share settings. Change them here (on GitHub) and they redeploy automatically.
+[vars]
+BOT_NAME = "CityWide Trip Planner"
+# The assistant's name in chats. It always says it is an AI if asked.
+ASSISTANT_NAME = "Maya"
+# Ask every user for an email before their first search ("true" or "false").
+REQUIRE_EMAIL = "true"
+# Sender for trip plans and codes, e.g. "Maya at CityWide Trip <maya@citywidetrip.com>".
+# Leave empty until citywidetrip.com is verified in Resend (guide part 9).
+EMAIL_FROM = ""
+# Resend free plan allows 100 emails a day; stop a little below.
+EMAIL_DAILY_MAX = "90"
+AI_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8-fast"
+# Daily safety caps for the whole bot (protect the free tier).
+# One AI call costs about 4-7 Neurons with this model, so 800 calls stays well under the free 10,000.
+AI_DAILY_MAX = "800"
+TP_DAILY_MAX = "3000"
+# Per-user limits. New = first 7 days; trusted = after that.
+NEW_SEARCHES_PER_DAY = "5"
+NEW_WATCHES_PER_DAY = "1"
+TRUSTED_SEARCHES_PER_DAY = "10"
+TRUSTED_WATCHES_PER_DAY = "2"
+MAX_ACTIVE_WATCHES = "3"
+# How many trip watches each 30-minute run checks (keeps each run small).
+WATCH_BATCH = "12"
+# Markets to retry when the default returns nothing (comma list, 2-letter codes).
+TP_FALLBACK_MARKETS = "us,in"
+# Sub-ID added to your marker on booking links (shows as "tg" in Travelpayouts stats). Set to "" to turn off.
+TP_SUBID = "tg"
+# Extra affiliate offers to show. Leave empty until you have joined those programs
+# in Travelpayouts. Options: hotels,esim,transfer,lounge
+EXTRAS_ENABLED = ""
