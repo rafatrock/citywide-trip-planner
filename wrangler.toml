@@ -20,7 +20,7 @@ binding = "AI"
 [[d1_databases]]
 binding = "DB"
 database_name = "citywide_trip"
-database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"
+database_id = "3a195839-234c-4a3c-a9d8-f829900946ba"
 
 # Burst limit: at most 10 messages per user per minute.
 [[ratelimits]]
