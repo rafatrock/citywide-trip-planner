@@ -6,12 +6,12 @@ import {
   touchUser, updateUser, deleteUserData, getUsage, addUsage, bump, saveSearch, getSearch,
   saveLink, recordPrice, priceStats, getConfig, nowSec, counter, cacheGet, cacheSet,
 } from './db.js';
-import { send, answer, typing, btn, url, rows, esc } from './tg.js';
+import { send, answer, typing, btn, url, rows, esc, logoLink, logoPreview } from './tg.js';
 import { parseTrip, missingField, addDays } from './parse.js';
 import { aiUnderstand } from './ai.js';
 import { placeByCode, resolvePlace, POPULAR_FROM, PLACES } from './places.js';
 import { citiesIn, countryName } from './countries.js';
-import { searchFares, bookingUrl, liveSearchUrl, multiCityUrl, specialOffers } from './tp.js';
+import { searchFares, bookingUrl, liveSearchUrl, multiCityUrl, specialOffers, moreFares } from './tp.js';
 import { rankFares, cheapestDates, PERSONAS, localParts, arrivalLocal } from './rank.js';
 import { handleAdmin, isAdmin } from './admin.js';
 import { createWatch, listWatches, stopWatch } from './watch.js';
@@ -633,6 +633,25 @@ export function fareQueries(draft, user) {
   return { queries: [{ ...base, depart: dep, ret }], windows: {} };
 }
 
+// Round-trip fares for the whole departure month (and the return month), from every price list,
+// sorted by how close their dates are to what was asked (within 10 days each way).
+async function nearestRoundTrips(env, draft, user) {
+  const cur = (user.currency || 'usd').toLowerCase();
+  const dep = draft.depart.value.length === 7 ? `${draft.depart.value}-15` : draft.depart.value;
+  const ret = draft.ret?.value || addDays(dep, { short: 3, week: 6, long: 10 }[draft.stay] || draft.nights || 7);
+  const base = { origin: draft.origin, destination: draft.destination, oneWay: false, direct: !!draft.direct, currency: cur };
+  const [a, b] = await Promise.all([
+    searchFares(env, { ...base, depart: monthOf(dep), ret: monthOf(ret) }),
+    moreFares(env, { origin: draft.origin, destination: draft.destination, month: monthOf(dep), oneWay: false, currency: cur }),
+  ]);
+  const curOut = a.items.length ? a.currency : b.currency;
+  const pool = [...(a.currency === curOut ? a.items : []), ...(b.currency === curOut ? b.items : [])].filter((it) => it.return_at);
+  const off = (it) => Math.abs(Date.parse(it.departure_at.slice(0, 10)) - Date.parse(dep)) / 86400000
+    + Math.abs(Date.parse(it.return_at.slice(0, 10)) - Date.parse(ret)) / 86400000;
+  const items = pool.filter((it) => off(it) <= 20).sort((x, y) => off(x) - off(y) || x.price - y.price).slice(0, 25);
+  return { items, currency: curOut };
+}
+
 async function fetchQuery(env, q) {
   let res = await searchFares(env, q);
   // a whole-month round trip that returns next month (e.g. 25 Jan → 3 Feb)
@@ -653,6 +672,13 @@ export async function fetchRanked(env, draft, user) {
     ({ queries, windows } = fareQueries({ ...draft, flex: '3d' }, user));
     results = await Promise.all(queries.map((q) => fetchQuery(env, q)));
     nearby = results.some((r) => r.items.length);
+  }
+  // still nothing for a round trip: look at the whole month(s) of real round-trip fares (all price
+  // lists), and keep the ones closest to the asked dates. Real return tickets, each with its own link,
+  // beat adding up two unrelated one-way prices.
+  if (!draft.oneWay && !results.some((r) => r.items.length || r.capped)) {
+    const near = await nearestRoundTrips(env, draft, user);
+    if (near.items.length) { results = [near]; windows = {}; nearby = true; }
   }
   let items = [];
   let currency = (user.currency || 'usd').toLowerCase();
@@ -709,7 +735,8 @@ async function runSearch(env, user, chat, draft, isGroup) {
     ret: draft.oneWay || !ranked[0].it.return_at ? undefined : ranked[0].it.return_at.slice(0, 10), adults: draft.adults, children: draft.children || 0 });
   const [msg, hrefs, liveHref, extras, gear] = await Promise.all([
     formatResults(env, user, draft, ranked, res.currency, pax, stats, best, vmap),
-    Promise.all(ranked.map((r) => trackedLink(env, bookingUrl(env, r.it), user.id, 'flight', {
+    Promise.all(ranked.map((r) => trackedLink(env, bookingUrl(env, r.it) || liveSearchUrl(env, { origin: draft.origin, destination: draft.destination,
+      depart: r.it.departure_at.slice(0, 10), ret: r.it.return_at ? r.it.return_at.slice(0, 10) : undefined, adults: draft.adults, children: draft.children || 0 }), user.id, 'flight', {
       sid: searchId, origin: draft.origin, destination: draft.destination, depart: r.it.departure_at.slice(0, 10),
       ret: r.it.return_at ? r.it.return_at.slice(0, 10) : null, adults: draft.adults, children: draft.children || 0, label: r.labels[0] }))),
     trackedLink(env, live, user.id, 'live'),
@@ -734,8 +761,9 @@ async function runSearch(env, user, chat, draft, isGroup) {
   if (!isGroup && user.email && emailReady(env)) keyboard.push([btn('📧 Email me this plan', `r:em:${searchId}`)]);
   if (extras[0]) keyboard.push([url(extras[0].text, extras[0].href)]); // one fitting extra (programs you've joined)
   if (gear) keyboard.push([gear]);
-  const note = res.nearby ? `<i>No recent prices on your exact dates, so these are the nearest days (± 3). Tap 🔎 to check your exact dates live.</i>\n\n` : '';
-  return send(env, chat.id, note + msg, keyboard);
+  const note = res.nearby ? `<i>No prices seen yet for your exact dates, so these are real return fares on the nearest dates travellers found. Tap 🔎 to check your exact dates live.</i>\n\n` : '';
+  const logo = /^[A-Z0-9]{2}$/.test(ranked[0].it.airline || '') ? ranked[0].it.airline : null;
+  return send(env, chat.id, logoLink(logo) + note + msg, keyboard, logoPreview(logo));
 }
 
 // One option, carrier first, laid out like an e-ticket.
@@ -745,6 +773,18 @@ function pickLines(r, cur, pax, i, d) {
   const orig = placeByCode(d.origin);
   const back = it.return_at ? backMinutes(it) : 0;
   const ret = it.return_at ? arrivalLocal(it.return_at, back, orig?.tz) : null;
+  if (it.timeless) {
+    // a fare from a price list that has dates but no flight times: show what we know, honestly
+    const st = (n) => (n ? `${n} stop${n > 1 ? 's' : ''}` : 'Non-stop');
+    const out = ['',
+      `${LABEL_ICON[r.labels[0]] || '✈️'} <b>Option ${i + 1} · ${r.labels.join(' · ')}${it.airline ? ` · ${esc(airline(it.airline))}` : ''}</b>`,
+      `<b>${money(it.price, cur)}</b> per person${pax > 1 ? ` · about ${money(it.price * pax, cur)} for ${pax}` : ''}`,
+      `🛫 ${tgDate(it.departure_at)} · ${esc(placeName(d.origin))} → ${esc(placeName(d.destination))} · ${st(it.transfers || 0)}`];
+    if (it.return_at) out.push(`🛬 ${tgDate(it.return_at)} · ${esc(placeName(d.destination))} → ${esc(placeName(d.origin))}${it.return_transfers !== undefined ? ` · ${st(it.return_transfers)}` : ''}`);
+    out.push('     <i>flight times on the booking page</i>');
+    if (r.reasons.why.length) out.push(`✅ ${r.reasons.why.filter((w) => w !== 'daytime arrival').join(', ')}`);
+    return out.join('\n');
+  }
   const lines = [
     '',
     `${LABEL_ICON[r.labels[0]] || '✈️'} <b>Option ${i + 1} · ${r.labels.join(' · ')} · ${esc(airline(it.airline))}</b>`,

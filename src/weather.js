@@ -69,7 +69,7 @@ export async function weatherLine(env, originCode, destCode, ym) {
   if (o) {
     const diff = d.avg - o.avg;
     if (diff >= 5) line += `, about ${diff}° warmer than home`;
-    else if (diff <= -5) line += `, about ${-diff}° colder than home, pack layers`;
+    else if (diff <= -5) line += `, about ${-diff}° colder than home${d.warn.includes('pack warm layers') ? '' : ', pack layers'}`;
     else line += ', similar to home';
   }
   if (d.warn.length) line += ` (${d.warn.join('; ')})`;

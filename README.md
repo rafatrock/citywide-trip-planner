@@ -1,10 +1,17 @@
-# CityWide Trip Planner — Telegram bot (version 4.9.1)
+# CityWide Trip Planner — Telegram bot (version 4.9.2)
 
 Travellers chat with **Maya**, a friendly AI travel assistant (she always says she's an AI if asked). They type a trip in one line; Maya replies with three picks for their group: ⭐ best overall, 💰 cheapest and 🛋️ most comfortable, plus weather and visa notes for their passport, and can watch prices.
 
 Runs free on Cloudflare (Workers, D1, Workers AI) and earns through your Travelpayouts account.
 
 **Setup:** follow the step-by-step **CityWide Trip Planner — Setup Guide** doc. No commands, nothing to install: only Telegram, GitHub's website and the Cloudflare dashboard.
+
+## What's new in version 4.9.2
+
+- **Real return tickets first:** when there's no fare for the exact dates, Maya looks at every round-trip fare travellers found that month (all price lists) and shows the ones on the nearest dates, each opening that exact ticket on Aviasales, so the card matches what people see there. Adding up two one-way prices is now the last resort.
+- **Honest price guide:** if nothing real is found, the card says "PRICE GUIDE", shows the guide price per flight with the day it was seen, and makes no claims about airlines, stops or best/cheapest/fastest.
+- **Airline logos:** the top pick's airline logo (Aviasales logo service, pics.avs.io) shows above the card.
+- Fares without flight times say "flight times on the booking page" instead of guessing.
 
 ## What's new in version 4.9.1
 

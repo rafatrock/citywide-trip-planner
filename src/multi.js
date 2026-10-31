@@ -8,7 +8,7 @@ import { liveLeg, liveReady, liveAlways } from './live.js';
 import { placeByCode, coordsFor } from './places.js';
 import { countryName } from './countries.js';
 import { visaFor, countryVisaMap, yesCountries, needsEmbassy, VISA_TIPS } from './visa.js';
-import { send, btn, url, esc } from './tg.js';
+import { send, btn, url, esc, logoLink, logoPreview } from './tg.js';
 import { addDays } from './parse.js';
 import { PERSONAS, localParts, arrivalLocal } from './rank.js';
 import { money } from './format.js';
@@ -143,15 +143,20 @@ async function legCandidates(env, leg, currency, spread) {
 // A leg with no prices near the dates: a fair estimate, clearly labelled.
 // 1) the cheapest seen on any day for this leg; 2) the same route in the other direction.
 async function legEstimate(env, leg, currency) {
-  const any = await searchFares(env, { origin: leg.from, destination: leg.to, depart: null, oneWay: true, currency });
-  if (any.items.length) {
-    const it = any.items.reduce((a, b) => (b.price < a.price ? b : a));
-    return { price: it.price, cur: any.currency, airline: it.airline, how: `cheapest seen for ${day(it.departure_at)}` };
+  // same month first (closest to the real price), then any day
+  const [month, any] = await Promise.all([
+    moreFares(env, { origin: leg.from, destination: leg.to, month: leg.date.slice(0, 7), oneWay: true, currency }),
+    searchFares(env, { origin: leg.from, destination: leg.to, depart: null, oneWay: true, currency }),
+  ]);
+  for (const r of [month, any]) {
+    if (!r.items.length) continue;
+    const it = r.items.reduce((a, b) => (b.price < a.price ? b : a));
+    return { price: it.price, cur: r.currency, how: `lowest seen for ${day(it.departure_at)}` };
   }
   const back = await searchFares(env, { origin: leg.to, destination: leg.from, depart: leg.date.slice(0, 7), oneWay: true, currency });
   if (back.items.length) {
     const it = back.items.reduce((a, b) => (b.price < a.price ? b : a));
-    return { price: it.price, cur: back.currency, airline: it.airline, how: 'based on the same route in the other direction' };
+    return { price: it.price, cur: back.currency, how: 'based on the same route the other way' };
   }
   return null;
 }
@@ -316,6 +321,17 @@ export async function runMulti(env, user, chat, d, h) {
       o.t.picks.forEach((p, i) => lines.push(`${NUM[i] || `${i + 1})`} ${day(p.leg.date)} · ${p.leg.from} → ${p.leg.to}`));
       continue;
     }
+    const real = o.t.picks.some((p) => p.view);
+    if (!real) {
+      lines.push('', `🧭 <b>PRICE GUIDE · ≈ ${money(total, cur)}</b>${pax > 1 ? ` <i>(≈ ${money(total * pax, cur)} for ${pax})</i>` : ''}`,
+        '<i>No fares seen yet for these dates. This guide comes from other days; the button below searches every airline live.</i>');
+      o.t.picks.forEach((p, i) => {
+        const n = NUM[i] || `${i + 1})`;
+        lines.push(est[i] ? `${n} ${day(p.leg.date)} · ${p.leg.from} → ${p.leg.to} · ≈ ${money(est[i].price, cur)} <i>(${esc(est[i].how)})</i>`
+          : `${n} ${day(p.leg.date)} · ${p.leg.from} → ${p.leg.to} · checked live when you open the trip`);
+      });
+      continue;
+    }
     lines.push('', `${o.icon} <b>${o.labels.join(' · ').toUpperCase()} · ${est && Object.keys(est).length ? '≈ ' : ''}${money(total, cur)}</b>${pax > 1 ? ` <i>(${money(total * pax, cur)} for ${pax})</i>` : ''}${unknown ? ` <i>+ ${unknown} flight${unknown > 1 ? 's' : ''} to check</i>` : ''}`);
     o.t.picks.forEach((p, i) => {
       const n = NUM[i] || `${i + 1})`;
@@ -333,8 +349,8 @@ export async function runMulti(env, user, chat, d, h) {
         lines.push(`${n} <b>${esc(carrier)}</b>${esc(flights)} · ${money(v.it.price, cur)}${v.it.live ? ' 🟢' : ''}`);
         lines.push(`     ${day(v.date)} · ${p.leg.from} ${hm(v.dep)} → ${p.leg.to}${v.arr ? ` ${hm(v.arr)}${plus}` : ''} · ${dur(v.dur)} · ${layoverText(v.it) || stopsText(p.leg.from, p.leg.to, v.dur, v.stops)}`);
       } else if (est[i]) {
-        lines.push(`${n} <b>${esc(h.airline(est[i].airline))}</b> · ≈ ${money(est[i].price, cur)} <i>(estimate: ${esc(est[i].how)})</i>`);
-        lines.push(`     ${day(p.leg.date)} · ${p.leg.from} → ${p.leg.to} · live price when you open the trip`);
+        lines.push(`${n} ${day(p.leg.date)} · ${p.leg.from} → ${p.leg.to} · ≈ ${money(est[i].price, cur)}`);
+        lines.push(`     <i>guide only (${esc(est[i].how)}); airlines and live price when you open the trip</i>`);
       } else {
         lines.push(`${n} ${day(p.leg.date)} · ${p.leg.from} → ${p.leg.to} · no price seen yet, checked live when you open the trip`);
       }
@@ -352,7 +368,7 @@ export async function runMulti(env, user, chat, d, h) {
     const saves = timeOf(cheap) - timeOf(o.t);
     if (o.labels.includes('Best overall') && !o.labels.includes('Cheapest')) why.push(`only ${money(diff, cur)} more than the cheapest${saves >= 30 ? `, ${dur(saves)} less flying` : ''}, better times`);
     if (!o.labels.includes('Cheapest') && !o.labels.includes('Best overall') && diff > 0) why.push(`costs ${money(diff, cur)} more than the cheapest`);
-    if (!stops) why.push('all non-stop');
+    if (!stops && o.t.picks.every((p) => p.view)) why.push('all non-stop');
     const warn = [];
     if (late) warn.push(`${late} late-night arrival${late > 1 ? 's' : ''}`);
     if (early) warn.push(`${early} very early departure${early > 1 ? 's' : ''}`);
@@ -383,7 +399,7 @@ export async function runMulti(env, user, chat, d, h) {
         : h.multiCityUrl(env, ls, pax);
     const have = links.find((l) => l.href === href);
     if (have) { have.labels.push(...o.labels); continue; }
-    links.push({ href, labels: [...o.labels], icon: o.icon, total: totalOf(o.t) + estTotal });
+    links.push({ href, labels: [...o.labels], icon: o.icon, total: o.t.picks.some((p) => p.view) ? totalOf(o.t) + estTotal : 0 });
   }
   const tracked = await Promise.all(links.map((l) => h.trackedLink(env, l.href, user.id, 'live', { origin: d.origin, destination: d.multi[0], depart: legs[0].date, multi: true, label: l.labels[0] })));
   links.forEach((l, i) => {
@@ -399,5 +415,7 @@ export async function runMulti(env, user, chat, d, h) {
     const g = await h.gearButton(env, user, d, best.picks[0]?.view?.it);
     if (g) kb.push([g]);
   }
-  return send(env, chat.id, lines.join('\n'), kb);
+  // the top option's airline logo above the card (Aviasales logo service)
+  const lead = best.picks.find((p) => p.view && /^[A-Z0-9]{2}$/.test(p.view.it.airline || ''))?.view.it.airline;
+  return send(env, chat.id, logoLink(lead) + lines.join('\n'), kb, logoPreview(lead));
 }
