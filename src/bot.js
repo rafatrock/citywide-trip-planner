@@ -8,7 +8,7 @@ import {
 } from './db.js';
 import { send, answer, typing, btn, url, rows, esc } from './tg.js';
 import { parseTrip, missingField, addDays } from './parse.js';
-import { aiParse } from './ai.js';
+import { aiUnderstand } from './ai.js';
 import { placeByCode, resolvePlace, POPULAR_FROM, PLACES } from './places.js';
 import { citiesIn, countryName } from './countries.js';
 import { searchFares, bookingUrl, liveSearchUrl, multiCityUrl } from './tp.js';
@@ -45,7 +45,7 @@ const AIRLINES = {
   AA: 'American', DL: 'Delta', UA: 'United', B6: 'JetBlue', WN: 'Southwest', NK: 'Spirit', AC: 'Air Canada',
   WS: 'WestJet', QF: 'Qantas', VA: 'Virgin Australia', JQ: 'Jetstar', NZ: 'Air New Zealand', PK: 'PIA',
   HY: 'Uzbekistan Airways', KC: 'Air Astana', DV: 'SCAT', T5: 'Turkmenistan Airlines', QH: 'Air Kyrgyzstan', J2: 'AZAL',
-  A9: 'Georgian Airways', C6: 'Centrum Air', SZ: 'Somon Air', '5W': 'Wizz Air Abu Dhabi', XY: 'flynas', F3: 'flyadeal', MS: 'EgyptAir', RJ: 'Royal Jordanian',
+  A9: 'Georgian Airways', C6: 'Centrum Air', VF: 'AJet', ZF: 'Azur Air', SZ: 'Somon Air', '5W': 'Wizz Air Abu Dhabi', XY: 'flynas', F3: 'flyadeal', MS: 'EgyptAir', RJ: 'Royal Jordanian',
   J9: 'Jazeera Airways', GF: 'Gulf Air', KU: 'Kuwait Airways', OV: 'SalamAir', PC: 'Pegasus', XQ: 'SunExpress',
   SU: 'Aeroflot', S7: 'S7 Airlines', ET: 'Ethiopian', KQ: 'Kenya Airways', '3K': 'Jetstar Asia', VZ: 'Thai Vietjet', DD: 'Nok Air', SL: 'Thai Lion Air',
 };
@@ -200,21 +200,56 @@ export function editDraft(prev, text, opts) {
   return changed ? d : null;
 }
 
+// Apply checked fields (from the rules or the AI) to the open trip. Returns null if nothing changed.
+export function applyFields(prev, f) {
+  const d = { ...prev };
+  let changed = false;
+  const set = (k, v) => { if (v !== undefined && JSON.stringify(d[k]) !== JSON.stringify(v)) { d[k] = v; changed = true; } };
+  for (const k of ['adults', 'children', 'oneWay', 'direct', 'budget', 'nights']) set(k, f[k]);
+  if (f.depart) {
+    set('depart', f.depart);
+    if (f.ret) set('ret', f.ret); else if (d.ret && d.ret.value <= f.depart.value) { delete d.ret; changed = true; }
+    set('flex', f.flex || (f.depart.type === 'month' ? 'month' : 'exact'));
+  } else if (f.flex) set('flex', f.flex);
+  if (f.persona && f.persona !== d.persona) set('persona', f.persona);
+  if (f.adults !== undefined || f.children !== undefined) {
+    delete d.paxGuess;
+    if (!d.children && d.persona === 'family') { d.persona = d.adults === 1 ? null : d.adults === 2 ? 'couple' : 'friends'; changed = true; }
+  }
+  return changed ? d : null;
+}
+
 async function onDraftReply(env, user, chat, text) {
   if (!user.draft) return false;
   let prev;
   try { prev = JSON.parse(user.draft); } catch { return false; }
   if (!prev || prev.awaiting || !prev.destination || !prev.depart) return false;
-  if (GO.test(text.trim())) {
-    if (prev.multi) return startMulti(env, user, chat, prev, false).then(() => true);
-    return runSearch(env, user, chat, prev, false).then(() => true);
+  const run = () => (prev.multi ? startMulti(env, user, chat, prev, false) : runSearch(env, user, chat, prev, false)).then(() => true);
+  if (GO.test(text.trim())) return run();
+  const opts = { now: new Date(), home: user.home, currency: user.currency || 'usd' };
+  const d = editDraft(prev, text, opts);
+  if (d) { d.justUpdated = true; await continueDraft(env, user, chat, d, false); return true; }
+  // the rules see a new place: a new trip (handled by onTripText)
+  const again = parseTrip(text, opts);
+  if (again.destination || again.multi || again.destCountry) return false;
+  // the rules didn't get it: ask the AI, with the open trip as context
+  if (text.trim().split(/\s+/).length < 2) return false;
+  const usage = await getUsage(env, `u${user.id}`);
+  if (usage.ai >= aiPerUser(env, user)) return false;
+  const [u] = await Promise.all([aiUnderstand(env, text, { now: opts.now, draft: prev, userKey: `u${user.id}` }), typing(env, chat.id)]);
+  if (!u) return false;
+  if (u.intent === 'go') return run();
+  if (u.intent === 'edit') {
+    const e = applyFields(prev, u.fields);
+    if (e) { e.justUpdated = true; await continueDraft(env, user, chat, e, false); return true; }
   }
-  const d = editDraft(prev, text, { now: new Date(), home: user.home, currency: user.currency || 'usd' });
-  if (!d) return false;
-  d.justUpdated = true;
-  await continueDraft(env, user, chat, d, false);
-  return true;
+  if (u.intent === 'new_trip' && (u.fields.destination || u.fields.multi || u.fields.destCountry)) {
+    await onTripText(env, user, chat, text, false, { ...u.fields, origin: u.fields.origin || prev.origin });
+    return true;
+  }
+  return false;
 }
+const aiPerUser = (env, user) => (isAdmin(env, user.id) ? 999 : Number(env.AI_PER_USER_DAY || 12));
 
 // Friendly replies that don't cost a search. Always honest about being an AI.
 async function smallTalk(env, user, chat, text) {
@@ -312,7 +347,7 @@ I give you three picks: ⭐ best overall, 💰 cheapest and 🛋️ most comfort
 // ---------------- trip flow ----------------
 function quotaKey(user, chat, isGroup) { return isGroup ? `g${chat.id}` : `u${user.id}`; }
 
-async function onTripText(env, user, chat, text, isGroup) {
+async function onTripText(env, user, chat, text, isGroup, preset = null) {
   const now = new Date();
   const prev = !isGroup && user.draft ? JSON.parse(user.draft) : null;
 
@@ -337,13 +372,26 @@ async function onTripText(env, user, chat, text, isGroup) {
   }
 
   let draft = parseTrip(text, { now, home: user.home, currency: user.currency || 'usd' });
-  if (!draft.destination && !draft.destCountry && text.split(/\s+/).length >= 3) {
-    const usage = await getUsage(env, quotaKey(user, chat, isGroup));
-    if (usage.ai < 6) {
-      await typing(env, chat.id);
-      const ai = await aiParse(env, text, { now, userKey: quotaKey(user, chat, isGroup) });
-      if (ai) draft = { ...ai, ...draft, destination: draft.destination || ai.destination, origin: draft.origin || ai.origin || user.home };
+  const words = text.split(/\s+/).length;
+  // The rules are instant and free. The AI reads messy or long messages (≥ 10 words) for what they mean;
+  // the rules' places and dates win, the AI fills what they missed (people, flexibility, length...).
+  let ai = preset;
+  if (!ai && ((!draft.destination && !draft.destCountry && words >= 3) || words >= 10)) {
+    const key = quotaKey(user, chat, isGroup);
+    const usage = await getUsage(env, key);
+    if (usage.ai < aiPerUser(env, user)) {
+      const [u] = await Promise.all([aiUnderstand(env, text, { now, userKey: key }), typing(env, chat.id)]);
+      if (u && u.intent !== 'other') ai = u.fields;
     }
+  }
+  if (ai) {
+    const rulesHavePlace = draft.destination || draft.destCountry || draft.multi;
+    for (const [k, v] of Object.entries(ai)) {
+      if (['destination', 'destCountry', 'multi'].includes(k) && rulesHavePlace) continue;
+      if (draft[k] === undefined) draft[k] = v;
+    }
+    if (!rulesHavePlace && ai.multi) delete draft.destCountry;
+    if (!draft.origin) draft.origin = user.home;
   }
   if (!draft.destination && !draft.destCountry && text.split(/\s+/).length >= 3) {
     await env.DB.prepare('INSERT INTO misses (user_id, text, at) VALUES (?, ?, ?)').bind(user.id, text.slice(0, 200), nowSec()).run();
@@ -578,7 +626,7 @@ async function runSearch(env, user, chat, draft, isGroup) {
   const pax = (draft.adults || 1) + (draft.children || 0);
   if (!ranked.length) {
     await bump(env, 'searches_empty');
-    const live = liveSearchUrl(env, { origin: draft.origin, destination: draft.destination, depart: draft.depart.value, ret: draft.ret?.value || (q.ret && q.ret.length === 10 ? q.ret : undefined), adults: draft.adults });
+    const live = liveSearchUrl(env, { origin: draft.origin, destination: draft.destination, depart: draft.depart.value, ret: draft.ret?.value || (q.ret && q.ret.length === 10 ? q.ret : undefined), adults: draft.adults, children: draft.children || 0 });
     const link = await trackedLink(env, live, user.id, 'live');
     const sid = await saveSearch(env, user.id, chat.id, { draft });
     return send(env, chat.id, `Sorry ${firstName(user)}, I don't have recent prices for ${esc(placeName(draft.origin))} → ${esc(placeName(draft.destination))} on those dates yet${draft.flex === 'exact' ? '. Flexible dates might help' : ''}. You can run a live search with my filters already set:`, [
@@ -601,7 +649,7 @@ async function runSearch(env, user, chat, draft, isGroup) {
   const ctx = toolkitContext(draft, ranked[0].it);
   ctx.lateArrival = ranked.some((r) => r.late);
   const live = liveSearchUrl(env, { origin: draft.origin, destination: draft.destination, depart: ranked[0].it.departure_at.slice(0, 10),
-    ret: draft.oneWay || !ranked[0].it.return_at ? undefined : ranked[0].it.return_at.slice(0, 10), adults: draft.adults });
+    ret: draft.oneWay || !ranked[0].it.return_at ? undefined : ranked[0].it.return_at.slice(0, 10), adults: draft.adults, children: draft.children || 0 });
   const [msg, hrefs, liveHref, extras, gear] = await Promise.all([
     formatResults(env, user, draft, ranked, res.currency, pax, stats, best, vmap),
     Promise.all(ranked.map((r) => trackedLink(env, bookingUrl(env, r.it), user.id, 'flight', {

@@ -86,6 +86,7 @@ export async function searchFares(env, q) {
     page: '1',
   };
   if (!q.oneWay && q.ret) base.return_at = q.ret;
+  if (!q.depart) delete base.departure_at; // any date: the cheapest seen recently
   // Price data is grouped by "market" (the country whose travellers searched). We ask the
   // likeliest markets at the same time, then the rest, and keep the first that has prices.
   const cur = (q.currency || 'usd').toLowerCase();
@@ -132,16 +133,31 @@ export function bookingUrl(env, item) {
   return `https://www.aviasales.com${path}${join}marker=${encodeURIComponent(marker(env))}`;
 }
 
+// Aviasales search links: /search/DAC1101TAS1401IST1801DAC3
+// = DAC on 11 Jan → TAS, 14 Jan → IST, 18 Jan → DAC, 3 passengers (checked on aviasales.com).
+// Passengers: adults digit, then children digit when there are children.
+const ddmm = (v) => {
+  const d = v.length === 7 ? `${v}-15` : v; // month only: open the middle of the month
+  return `${d.slice(8, 10)}${d.slice(5, 7)}`;
+};
+const paxCode = (adults = 1, children = 0) => {
+  const a = Math.min(Math.max(adults || 1, 1), 9);
+  const c = Math.min(Math.max(children || 0, 0), 9 - a);
+  return c ? `${a}${c}` : `${a}`;
+};
+
 // Pre-filled search link for when there is no cached fare (search runs live on Aviasales).
-export function liveSearchUrl(env, { origin, destination, depart, ret, adults = 1 }) {
-  const ddmm = (v) => {
-    const d = v.length === 7 ? `${v}-15` : v; // month only: open the middle of the month
-    return `${d.slice(8, 10)}${d.slice(5, 7)}`;
-  };
+export function liveSearchUrl(env, { origin, destination, depart, ret, adults = 1, children = 0 }) {
   let p = `${origin}${ddmm(depart)}${destination}`;
   if (ret) p += ddmm(ret);
-  p += String(Math.min(Math.max(adults, 1), 9));
-  return `https://www.aviasales.com/search/${p}?marker=${encodeURIComponent(marker(env))}`;
+  return `https://www.aviasales.com/search/${p}${paxCode(adults, children)}?marker=${encodeURIComponent(marker(env))}`;
+}
+
+// The whole route as one multi-city search. legs = [{ from, to, date: 'YYYY-MM-DD' }] in order.
+export function multiCityUrl(env, legs, { adults = 1, children = 0 } = {}) {
+  let p = legs[0].from;
+  for (const l of legs) p += `${ddmm(l.date)}${l.to}`;
+  return `https://www.aviasales.com/search/${p}${paxCode(adults, children)}?marker=${encodeURIComponent(marker(env))}`;
 }
 
 // ---------- partner links for extras (hotels, eSIM, transfers, lounges) ----------
@@ -168,19 +184,3 @@ export async function partnerLink(env, targetUrl) {
   return link;
 }
 
-// One search for the whole route as a multi-city ticket (official Aviasales link format).
-// legs = [{ from, to, date: 'YYYY-MM-DD' }]
-export function multiCityUrl(env, legs, { adults = 1, children = 0 } = {}) {
-  const p = new URLSearchParams();
-  legs.forEach((l, i) => {
-    p.set(`segments[${i}][origin_iata]`, l.from);
-    p.set(`segments[${i}][destination_iata]`, l.to);
-    p.set(`segments[${i}][depart_date]`, l.date);
-  });
-  p.set('adults', String(Math.min(Math.max(adults, 1), 9)));
-  p.set('children', String(Math.max(0, Math.min(children, 9 - adults))));
-  p.set('infants', '0');
-  p.set('trip_class', '0');
-  p.set('marker', marker(env));
-  return `https://search.aviasales.com/flights/?${p.toString()}`;
-}

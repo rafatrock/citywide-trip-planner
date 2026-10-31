@@ -142,8 +142,18 @@ export function chooseLegs(legs, cands, { window, nightsPer, minNights }) {
       return d >= lo && d <= hi;
     });
     const best = pool.length ? pool.reduce((a, b) => (b.price < a.price ? b : a)) : null;
+    // a second option to compare: fewer stops first, else another airline
+    let alt = null;
+    if (best) {
+      const others = pool.filter((it) => it !== best && it.price < best.price * 1.8);
+      const fewer = others.filter((it) => (it.transfers || 0) < (best.transfers || 0)).sort((a, b) => a.price - b.price)[0];
+      alt = fewer || others.filter((it) => it.airline !== best.airline).sort((a, b) => a.price - b.price)[0] || null;
+    }
+    // nothing near the plan: the cheapest seen on any day, as a price reference only
+    const all = cands[i]?.items || [];
+    const ref = !best && all.length ? all.reduce((a, b) => (b.price < a.price ? b : a)) : null;
     const date = best ? best.departure_at.slice(0, 10) : (target < lo ? lo : target);
-    out.push({ leg: { ...leg, date }, best, cur: cands[i]?.cur, target });
+    out.push({ leg: { ...leg, date }, best, alt, ref, cur: cands[i]?.cur, target });
     prev = date;
   });
   return out;
@@ -160,6 +170,12 @@ export async function runMulti(env, user, chat, d, h) {
   const minNights = flexible ? Math.max(1, per - 1) : per;
   // every leg's prices at the same time (much faster than one after another)
   const cands = await Promise.all(legs.map((leg) => legCandidates(env, leg, user.currency || 'usd', window + 3)));
+  // legs with no prices at all in those months: ask once for any date, as a price reference
+  await Promise.all(cands.map(async (c, i) => {
+    if (c.items.length) return;
+    const r = await searchFares(env, { origin: legs[i].from, destination: legs[i].to, depart: null, oneWay: true, currency: user.currency || 'usd' });
+    if (r.items.length) cands[i] = { items: r.items, cur: r.currency, capped: false };
+  }));
   const results = chooseLegs(legs, cands, { window, nightsPer, minNights }).map((r) => ({ ...r, dist: km(r.leg.from, r.leg.to) }));
   const cur = results.find((r) => r.best)?.cur || user.currency || 'usd';
   const first = results[0].leg.date;
@@ -187,14 +203,17 @@ export async function runMulti(env, user, chat, d, h) {
   let missing = 0;
   results.forEach((r, i) => {
     const head = `${i + 1}) ${esc(name(r.leg.from))} → ${esc(name(r.leg.to))} · ${day(r.leg.date)}`;
+    const opt = (icon, it) => `     ${icon} <b>${esc(h.airline(it.airline))}</b> · ${money(it.price, cur)} · ${stopsText(r.leg.from, r.leg.to, it.duration_to || it.duration, it.transfers)}${it.departure_at.slice(0, 10) !== r.leg.date ? ` · ${day(it.departure_at)}` : ''}`;
+    const road = r.dist && r.dist < 800 ? '\n     🚌 Short hop: buses or shared taxis are common and often cheaper.' : '';
     if (r.best && r.cur === cur) {
       total += r.best.price;
-      const stops = stopsText(r.leg.from, r.leg.to, r.best.duration_to || r.best.duration, r.best.transfers);
-      lines.push(`${head}\n     <b>${esc(h.airline(r.best.airline))}</b> · ${money(r.best.price, cur)} · ${stops}`);
+      lines.push(`${head}\n${opt('💰', r.best)}${r.alt ? `\n${opt(r.alt.transfers < r.best.transfers ? '🛋️' : '✈️', r.alt)}` : ''}${road}`);
+    } else if (r.ref && r.cur === cur) {
+      missing += 1;
+      lines.push(`${head}\n     No price for these days yet. Usually from <b>${money(r.ref.price, cur)}</b> (${esc(h.airline(r.ref.airline))}, seen for ${day(r.ref.departure_at)}); the one-ticket search checks your dates live.${road}`);
     } else {
       missing += 1;
-      const road = r.dist && r.dist < 800 ? ' 🚌 Short hop: buses or shared taxis are common and often cheaper.' : '';
-      lines.push(`${head}\n     No recent price; the multi-city search checks it live.${road}`);
+      lines.push(`${head}\n     No recent price; the one-ticket search checks it live.${road}`);
     }
   });
   lines.push('');

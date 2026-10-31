@@ -86,8 +86,9 @@ test('multi-city: Uzbekistan and Turkey, one-ticket search, stays keep their nig
   assert.match(res.body.text, /Best way to book/);
   const whole = buttons(res).find((b) => b.text.startsWith('🔎 Whole route as one ticket'));
   const target = env.DB.raw.prepare('SELECT url FROM links WHERE id = ?').get(whole.url.split('/go/')[1]).url;
-  const dates = [...decodeURIComponent(target).matchAll(/depart_date\]=(\d{4}-\d\d-\d\d)/g)].map((m) => m[1]);
-  assert.equal(dates.length, 3);
+  const m = target.match(/\/search\/DAC(\d{4})TAS(\d{4})IST(\d{4})DAC3\?marker=/);
+  assert.ok(m, target);
+  const dates = [m[1], m[2], m[3]].map((dm) => `2027-${dm.slice(2)}-${dm.slice(0, 2)}`);
   const gap = (a, b) => (Date.parse(b) - Date.parse(a)) / 86400000;
   assert.ok(gap(dates[0], dates[1]) >= 2 && gap(dates[1], dates[2]) >= 2, `each stop keeps at least 2 of its 3 nights: ${dates}`);
 });
@@ -104,4 +105,48 @@ test('leg chooser: cheapest day near the plan, never squeezing a stay', () => {
   assert.equal(out[0].leg.date, '2027-01-11');
   assert.equal(out[1].leg.date, '2027-01-15', 'skipped the too-early cheap day');
   assert.equal(out[2].leg.date, '2027-01-18', 'no price: planned nights after the last leg');
+});
+
+test('AI understands replies to the open card (free model), and can use Claude when a key is set', async () => {
+  const log = installFetch();
+  const seen = [];
+  const AI = { run: async (model, { messages }) => {
+    seen.push({ model, user: messages[1].content });
+    const msg = messages[1].content;
+    if (/one more person/.test(msg)) return { response: '{"intent":"edit","adults":5}', usage: { prompt_tokens: 900, completion_tokens: 10, total_tokens: 910 } };
+    if (/show me prices/.test(msg)) return { response: '{"intent":"go"}', usage: { prompt_tokens: 900, completion_tokens: 6, total_tokens: 906 } };
+    return { response: '{"intent":"other"}' };
+  } };
+  const env = makeEnv({ AI, AI_MODEL: '@cf/meta/llama-3.1-8b-instruct-fp8-fast' }); // old setting: upgraded automatically
+  const { U } = await rafat(env, { id: 55, persona: 'friends' });
+  await post(env, privateMsg('Me and 3 friends, Dhaka to Bangkok, December', U));
+  await post(env, privateMsg('can we squeeze one more person in', U));
+  assert.match(lastText(log), /^Updated ✅/);
+  assert.match(lastText(log), /5 people/);
+  assert.match(seen.at(-1).user, /^Current trip: DAC → BKK, 2026-12/, 'the AI sees the open trip');
+  assert.equal(seen.at(-1).model, '@cf/meta/llama-4-scout-17b-16e-instruct');
+  await post(env, privateMsg('sounds good, show me prices', U));
+  assert.match(lastText(log), /Here's what I found|don't have recent prices/);
+  const n = env.DB.raw.prepare("SELECT SUM(value) AS v FROM counters WHERE name = 'ai_neurons'").get().v;
+  assert.ok(n > 0 && n < 100, `Neurons counted: ${n}`);
+
+  // Claude (paid, optional): same job through the Anthropic API
+  const log2 = installFetch();
+  const real = globalThis.fetch;
+  globalThis.fetch = async (input, opts) => {
+    const u = String(typeof input === 'string' ? input : input.url);
+    if (u === 'https://api.anthropic.com/v1/messages') {
+      const body = JSON.parse(opts.body);
+      log2.claude = body;
+      return new Response(JSON.stringify({ content: [{ type: 'text', text: '{"intent":"edit","adults":2,"children":0}' }], usage: { input_tokens: 800, output_tokens: 12 } }));
+    }
+    return real(input, opts);
+  };
+  const env2 = makeEnv({ AI_MODEL: 'claude-haiku-5-5', ANTHROPIC_API_KEY: 'sk-test' });
+  const r = await rafat(env2, { id: 56, persona: 'friends' });
+  await post(env2, privateMsg('Me and 3 friends, Dhaka to Bangkok, December', r.U));
+  await post(env2, privateMsg('two of the guys dropped out sadly', r.U));
+  globalThis.fetch = real;
+  assert.equal(log2.claude.model, 'claude-haiku-5-5');
+  assert.match(lastSent(log2).body.text, /2 people/);
 });

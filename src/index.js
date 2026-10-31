@@ -194,6 +194,7 @@ export default {
           await checkWatches(env);
           await weeklyDigest(env);
           await refreshNews(env);
+          await refreshAirlines(env); // only fetches if the list is missing or a week old
         }
       } catch (e) {
         console.log('cron failed', e && e.stack ? e.stack : e);

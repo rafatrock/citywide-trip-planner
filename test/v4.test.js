@@ -62,11 +62,10 @@ test('the screenshot: a 3-country backpacker trip works, no loop', async () => {
   assert.ok(whole, 'one multi-city search for the whole route');
   const go = whole.url.split('/go/')[1];
   const target = env.DB.raw.prepare('SELECT url FROM links WHERE id = ?').get(go).url;
-  assert.match(decodeURIComponent(target), /^https:\/\/search\.aviasales\.com\/flights\/\?segments\[0\]\[origin_iata\]=DAC&segments\[0\]\[destination_iata\]=/);
-  assert.match(decodeURIComponent(target), /segments\[3\]\[destination_iata\]=DAC/);
-  assert.match(target, /adults=3/);
-  // each stay keeps its nights: leg dates never squeeze a stop to zero nights
-  const dates = [...decodeURIComponent(target).matchAll(/depart_date\]=(\d{4}-\d\d-\d\d)/g)].map((m) => m[1]);
+  const m = target.match(/^https:\/\/www\.aviasales\.com\/search\/DAC(\d{4})TAS(\d{4})(FRU|BSZ)(\d{4})ASB(\d{4})DAC3\?marker=/);
+  assert.ok(m, `one multi-city path like DAC1101TAS1401IST1801DAC3: ${target}`);
+  const iso = (dm) => `2027-${dm.slice(2)}-${dm.slice(0, 2)}`;
+  const dates = [m[1], m[2], m[4], m[5]].map(iso);
   for (let i = 1; i < dates.length; i += 1) assert.ok(dates[i] > dates[i - 1], `leg ${i + 1} after leg ${i}: ${dates}`);
   assert.ok(buttons(res).some((b) => b.text?.startsWith('🎒 Pack:')), 'packing picks for a cold trip');
   assert.ok(log.tp.some((q) => q.origin === 'FRU' || q.destination === 'FRU'), 'Bishkek retried with its old code FRU');

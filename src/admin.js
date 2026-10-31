@@ -49,7 +49,7 @@ export async function buildReport(env, day) {
     `Emails sent: ${g('emails_sent')} / ${caps.day} (codes ${g('emails_code')}, plans ${g('emails_plan')})${g('email_capped') ? ` · ${g('email_capped')} held back by limits` : ''}${g('email_errors') ? ` · ${g('email_errors')} failed` : ''} · this month ${emMonth} / ${caps.month}${emMonth >= caps.month * 0.8 ? ' ⚠️ over 80%' : ''}`,
     '',
     '<b>Free-tier budget</b>',
-    `AI calls: ${g('ai_calls')} / ${aiMax} (${pct(g('ai_calls'), aiMax)})${g('ai_tokens') ? ` · ${g('ai_tokens')} tokens` : ''} · reused from cache: ${g('ai_cache_hits')}${g('ai_errors') ? ` · ${g('ai_errors')} errors` : ''}`,
+    `AI calls: ${g('ai_calls')} / ${aiMax} · Neurons ${g('ai_neurons')} / ${Number(env.AI_NEURONS_MAX || 8000)} (free: 10,000)${g('ai_tokens') ? ` · ${g('ai_tokens')} tokens` : ''} · reused from cache: ${g('ai_cache_hits')}${g('ai_errors') ? ` · ${g('ai_errors')} errors` : ''}`,
     `Price API calls: ${g('tp_calls')} / ${tpMax} · cache hits ${pct(g('tp_cache_hits'), tpTotal)}${g('tp_errors') ? ` · ${g('tp_errors')} errors` : ''}${g('tp_rate_limited') ? ` · ${g('tp_rate_limited')} rate-limited` : ''}`,
     '',
     '<b>Abuse control</b>',
