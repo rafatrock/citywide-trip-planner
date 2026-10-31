@@ -15,6 +15,7 @@ import { climate, describe, weatherLine } from './weather.js';
 import { toolkit, storeFor, gearPicks, gearUrl } from './toolkit.js';
 import { money } from './format.js';
 import { newsLine } from './news.js';
+import { specialOffers } from './tp.js';
 
 const list = (s) => String(s || '').split(',').map((x) => x.trim()).filter(Boolean);
 const name = (code) => placeByCode(code)?.name || code;
@@ -168,6 +169,13 @@ export async function latest(env, user, chatId, { digest = false } = {}) {
       const trend = row.low && row.last <= row.low ? ' 📉 the lowest I’ve seen' : row.low ? ` (lowest seen: ${money(row.low, row.cur)})` : '';
       items.push(`💸 <b>${esc(name(it.origin))} → ${esc(name(it.dest))}</b> in ${monthName(it.month)}: from ${money(row.last, row.cur)} per person${trend}.`);
     }
+  }
+  // a2) a real low fare from your home city (Aviasales special offers), preferring places you searched
+  if (user.home && items.length < 4) {
+    const offers = await specialOffers(env, user.home, user.currency || 'usd');
+    const want = new Set(interests.map((i) => i.dest));
+    const o = offers.find((x) => want.has(x.destination)) || offers[0];
+    if (o) items.push(`🏷️ Deal: <b>${esc(name(user.home))} → ${esc(o.destination_name || name(o.destination))}</b> from ${money(o.price, String(user.currency || 'usd').toLowerCase())}${o.airline_title ? ` with ${esc(o.airline_title)}` : ''}. More in /deals`);
   }
   // b) news you posted (/post) that matches this traveller
   const tags = new Set(['ALL', user.country, ...passports, ...interests.map((i) => placeByCode(i.dest)?.cc), ...interests.map((i) => i.dest)].filter(Boolean));

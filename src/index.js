@@ -59,6 +59,7 @@ async function setup(env, request) {
   await tg(env, 'setMyCommands', {
     commands: [
       { command: 'plan', description: 'Plan a new trip' },
+      { command: 'deals', description: 'Cheap fares from your city' },
       { command: 'latest', description: 'Updates picked for you' },
       { command: 'watches', description: 'Your price watches' },
       { command: 'trips', description: 'Your booked trips' },

@@ -23,8 +23,8 @@ async function edgePut(key, value, ttl) {
   } catch { /* not available */ }
 }
 
-async function callApi(env, params) {
-  const key = `tp:${new URLSearchParams(params).toString()}`;
+async function callApi(env, params, url = API) {
+  const key = `tp:${url === API ? '' : `${url.split('/').slice(-2).join('/')}:`}${new URLSearchParams(params).toString()}`;
   const edge = await edgeGet(key);
   if (edge) {
     await bump(env, 'tp_cache_hits');
@@ -41,7 +41,7 @@ async function callApi(env, params) {
   let body;
   try {
     const [res] = await Promise.all([
-      fetch(`${API}?${new URLSearchParams(params)}`, {
+      fetch(`${url}?${new URLSearchParams(params)}`, {
         headers: { 'X-Access-Token': env.TP_TOKEN, 'Accept-Encoding': 'gzip' },
         signal: AbortSignal.timeout(8000),
       }),
@@ -56,8 +56,12 @@ async function callApi(env, params) {
     await bump(env, 'tp_errors');
     return { error: 'network', data: [] };
   }
-  const out = { success: !!body.success, currency: body.currency || params.currency, data: Array.isArray(body.data) ? body.data : [] };
-  const ttl = out.data.length ? CACHE_TTL : 2 * 3600;
+  // prices_for_dates answers with a list; the older endpoints answer with an object (kept as is)
+  const data = Array.isArray(body.data) ? body.data : (body.data && typeof body.data === 'object' ? body.data : []);
+  const prices = Array.isArray(body.prices) ? body.prices : (Array.isArray(body.data?.prices) ? body.data.prices : undefined);
+  const out = { success: !!body.success, currency: body.currency || params.currency, data, ...(prices ? { prices } : {}) };
+  const has = Array.isArray(data) ? data.length : Object.keys(data).length || (prices && prices.length);
+  const ttl = has ? CACHE_TTL : 2 * 3600;
   await Promise.all([cacheSet(env, key, out, ttl), edgePut(key, out, ttl)]);
   return out;
 }
@@ -120,6 +124,68 @@ export async function searchFares(env, q) {
     if (oa || da) return searchFares(env, { ...q, origin: oa || q.origin, destination: da || q.destination, altTried: true });
   }
   return { items: [], currency: cur };
+}
+
+// ---------- more of the Aviasales Data API (used when prices_for_dates has nothing) ----------
+// Each endpoint is a separate index of recent traveller searches, so together they find a price
+// far more often. Docs: support.travelpayouts.com/hc/en-us/articles/203956163-Aviasales-Data-API
+const V1_CHEAP = 'https://api.travelpayouts.com/v1/prices/cheap';
+const V1_DIRECT = 'https://api.travelpayouts.com/v1/prices/direct';
+const LATEST = 'https://api.travelpayouts.com/aviasales/v3/get_latest_prices';
+const OFFERS = 'https://api.travelpayouts.com/aviasales/v3/get_special_offers';
+const NEAREST = 'https://api.travelpayouts.com/v2/prices/nearest-places-matrix';
+
+// v1 answers look like { KUL: { "0": {fare}, "1": {fare} } } where the key is the number of stops
+function fromV1(data, now = Date.now()) {
+  const out = [];
+  for (const byStops of Object.values(data || {})) {
+    for (const [stops, f] of Object.entries(byStops || {})) {
+      if (!f || !f.price || !f.departure_at) continue;
+      if (f.expires_at && Date.parse(f.expires_at) < now) continue; // an old price: skip it
+      out.push({ price: f.price, airline: f.airline || '', flight_number: f.flight_number ? String(f.flight_number) : '', departure_at: f.departure_at,
+        return_at: f.return_at || undefined, transfers: Number(stops) || 0, timeless: true, source: 'v1' });
+    }
+  }
+  return out;
+}
+
+// get_latest_prices answers with dates and prices but no airline or times
+function fromLatest(list) {
+  return (Array.isArray(list) ? list : []).filter((f) => f && f.value && f.depart_date).map((f) => ({
+    price: f.value, airline: '', flight_number: '', departure_at: `${f.depart_date}T12:00:00Z`,
+    return_at: f.return_date ? `${f.return_date}T12:00:00Z` : undefined, transfers: f.number_of_changes || 0,
+    duration_to: f.duration || undefined, timeless: true, partial: true, source: 'latest',
+  }));
+}
+
+// Three more price indexes for one route and month, asked side by side.
+export async function moreFares(env, { origin, destination, month, oneWay = true, currency = 'usd' }) {
+  const cur = currency.toLowerCase();
+  const rt = oneWay ? {} : { return_date: month };
+  const [cheap, direct, latest] = await Promise.all([
+    callApi(env, { origin, destination, depart_date: month, currency: cur, ...rt }, V1_CHEAP),
+    callApi(env, { origin, destination, depart_date: month, currency: cur, ...rt }, V1_DIRECT),
+    callApi(env, { origin, destination, period_type: 'month', beginning_of_period: `${month}-01`, one_way: String(!!oneWay), group_by: 'dates', sorting: 'price', limit: '60', currency: cur }, LATEST),
+  ]);
+  const items = [...fromV1(cheap.data), ...fromV1(direct.data), ...fromLatest(latest.data)]
+    .filter((f) => (oneWay ? !f.return_at : !!f.return_at));
+  return { items, currency: cur };
+}
+
+// Unusually low fares from a city (Aviasales "special offers"): for /deals and /latest.
+export async function specialOffers(env, origin, currency = 'usd') {
+  if (!origin) return [];
+  const r = await callApi(env, { origin, currency: currency.toLowerCase(), locale: 'en' }, OFFERS);
+  const list = Array.isArray(r.data) ? r.data : [];
+  return list.filter((o) => o && o.price && o.destination && (!o.departure_at || Date.parse(o.departure_at) > Date.now()))
+    .sort((a, b) => a.price - b.price).slice(0, 8);
+}
+
+// Cheaper nearby airports or cities for a route (e.g. Chattogram instead of Dhaka).
+export async function nearbyAirports(env, { origin, destination, month, currency = 'usd' }) {
+  const r = await callApi(env, { origin, destination, depart_date: month, limit: '5', distance: '5', flexibility: '3', currency: currency.toLowerCase(), show_to_affiliates: 'true' }, NEAREST);
+  const prices = r.prices || [];
+  return prices.filter((p) => p && p.value && (p.origin !== origin || p.destination !== destination)).sort((a, b) => a.value - b.value).slice(0, 2);
 }
 
 // ---------- booking links ----------

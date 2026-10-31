@@ -31,6 +31,7 @@ export async function buildReport(env, day) {
   const tpTotal = g('tp_calls') + g('tp_cache_hits');
   const caps = emailCaps(env);
   const emMonth = await counter(env, 'emails_sent', monthKey(new Date(`${day}T12:00:00Z`)));
+  const emLive = await counter(env, 'live_calls', monthKey(new Date(`${day}T12:00:00Z`)));
   return [
     `<b>📊 CityWide Trip Planner · ${day} (UTC)</b>`,
     '',
@@ -52,6 +53,8 @@ export async function buildReport(env, day) {
     '<b>Free-tier budget</b>',
     `AI calls: ${g('ai_calls')} / ${aiMax} · Neurons ${g('ai_neurons')} / ${Number(env.AI_NEURONS_MAX || 8000)} (free: 10,000)${g('ai_tokens') ? ` · ${g('ai_tokens')} tokens` : ''} · reused from cache: ${g('ai_cache_hits')}${g('ai_errors') ? ` · ${g('ai_errors')} errors` : ''}`,
     `Price API calls: ${g('tp_calls')} / ${tpMax} · cache hits ${pct(g('tp_cache_hits'), tpTotal)}${g('tp_errors') ? ` · ${g('tp_errors')} errors` : ''}${g('tp_rate_limited') ? ` · ${g('tp_rate_limited')} rate-limited` : ''}`,
+    '',
+    `Live Google Flights searches: ${g('live_calls')} today · ${emLive} this month of ${Number(env.LIVE_MONTHLY_MAX || 240)}${g('live_errors') ? ` · ${g('live_errors')} failed` : ''}${env.SEARCHAPI_KEY || env.SERPAPI_KEY ? '' : ' (not set up: add SEARCHAPI_KEY)'}`,
     '',
     '<b>Abuse control</b>',
     `Daily-quota blocks: ${g('quota_blocked')} · Burst blocks: ${g('burst_blocked')} · Reused email/phone refused: ${g('dup_email') + g('dup_phone')}`,

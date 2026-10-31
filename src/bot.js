@@ -11,7 +11,7 @@ import { parseTrip, missingField, addDays } from './parse.js';
 import { aiUnderstand } from './ai.js';
 import { placeByCode, resolvePlace, POPULAR_FROM, PLACES } from './places.js';
 import { citiesIn, countryName } from './countries.js';
-import { searchFares, bookingUrl, liveSearchUrl, multiCityUrl } from './tp.js';
+import { searchFares, bookingUrl, liveSearchUrl, multiCityUrl, specialOffers } from './tp.js';
 import { rankFares, cheapestDates, PERSONAS, localParts, arrivalLocal } from './rank.js';
 import { handleAdmin, isAdmin } from './admin.js';
 import { createWatch, listWatches, stopWatch } from './watch.js';
@@ -22,6 +22,7 @@ import { latestNewsFor, newsLine } from './news.js';
 import { noteInterest, onBookedAnswer, listTrips, removeTrip, latest } from './retention.js';
 import { money as fmtMoney } from './format.js';
 import { recordSearch, recordEvent } from './profile.js';
+import { liveAlways } from './live.js';
 import { multiSummary, multiKeyboard, runMulti, orderStops, stopsText } from './multi.js';
 import { weatherLine, climate, describe, pleasantScore } from './weather.js';
 import { sendEmail, planEmail, unsubSig, emailReady, emailRoom, monthKey } from './email.js';
@@ -181,6 +182,26 @@ async function newUserSurge(env, chat) {
   return false;
 }
 
+// ---------- /deals: unusually low fares from your home city (Aviasales special offers) ----------
+async function showDeals(env, user, chat) {
+  const home = user.home;
+  if (!home) return send(env, chat.id, 'Tell me your home city first in /settings, then I can show deals from there.');
+  const offers = await specialOffers(env, home, user.currency || 'usd');
+  if (!offers.length) return send(env, chat.id, `No special fares from ${esc(placeName(home))} right now, ${firstName(user)}. I'll keep looking. Try /latest, or tell me a trip.`);
+  const cur = String(user.currency || 'usd').toLowerCase();
+  const lines = [`🔥 <b>Cheap fares from ${esc(placeName(home))}</b> right now`, '<i>Seen by travellers recently; tap to check the live price.</i>', ''];
+  const kb = [];
+  for (const [i, o] of offers.slice(0, 6).entries()) {
+    const dest = o.destination_name || placeName(o.destination);
+    const when = o.departure_at ? fmtDay(o.departure_at) : '';
+    lines.push(`${i + 1}) <b>${esc(dest)}</b> · ${money(o.price, cur)}${o.airline_title || o.airline ? ` · ${esc(o.airline_title || airline(o.airline))}` : ''}${when ? ` · ${when}` : ''}`);
+    const href = o.link ? await trackedLink(env, bookingUrl(env, { link: o.link }), user.id, 'flight', { origin: home, destination: o.destination, label: 'Deal' }) : null;
+    if (href) kb.push([url(`✈️ ${dest} · ${money(o.price, cur)}`, href)]);
+  }
+  lines.push('', 'Want one of these for your group and dates? Just tell me, e.g. <i>"2 of us to ' + esc(offers[0].destination_name || placeName(offers[0].destination)) + ' next month"</i>.');
+  return send(env, chat.id, lines.join('\n'), kb);
+}
+
 // ---------- replies to an open trip card ----------
 // While a "Here's what I understood" card is open, short messages change that trip
 // ("1 adult only", "one way", "15 to 20 Jan", "flexible") or run it ("go", "search").
@@ -316,6 +337,8 @@ async function onCommand(env, user, chat, text, isGroup) {
       if (args.length) return onTripText(env, user, chat, args.join(' '), isGroup);
       await updateUser(env, user.id, { draft: null });
       return send(env, chat.id, `Sure, ${firstName(user)}! Tell me your trip in one line, e.g.\n<i>"Family of 4, 2 kids, London to Bali in July, under £3,000 total"</i>`);
+    case '/deals':
+      return showDeals(env, user, chat);
     case '/watches':
       return listWatches(env, user, chat.id);
     case '/latest':
@@ -369,7 +392,7 @@ Type your trip in one line, the way you'd tell a friend:
 
 I give you my picks: ⭐ best overall, 💰 cheapest, ⚡ fastest and 🛋️ most comfortable, with visa and weather notes, and I can watch prices for you.
 
-/plan new trip · /latest updates for you · /watches price watches · /trips booked trips · /currency · /visas · /profile · /settings · /privacy · /delete`;
+/plan new trip · /deals cheap fares from home · /latest updates for you · /watches price watches · /trips booked trips · /currency · /visas · /profile · /settings · /privacy · /delete`;
 
 // ---------------- trip flow ----------------
 function quotaKey(user, chat, isGroup) { return isGroup ? `g${chat.id}` : `u${user.id}`; }
@@ -657,17 +680,17 @@ async function runSearch(env, user, chat, draft, isGroup) {
   if (res.capped && !ranked.length) return send(env, chat.id, "I'm very busy today and paused new price checks to stay free for everyone. Please try again tomorrow, sorry!");
 
   const pax = (draft.adults || 1) + (draft.children || 0);
-  if (!ranked.length) {
-    await bump(env, 'searches_empty');
-    const live = liveSearchUrl(env, { origin: draft.origin, destination: draft.destination, depart: draft.depart.value, ret: draft.ret?.value || (q.ret && q.ret.length === 10 ? q.ret : undefined), adults: draft.adults, children: draft.children || 0 });
-    const link = await trackedLink(env, live, user.id, 'live');
-    const sid = await saveSearch(env, user.id, chat.id, { draft });
-    return send(env, chat.id, `Sorry ${firstName(user)}, I don't have recent prices for ${esc(placeName(draft.origin))} → ${esc(placeName(draft.destination))} on those dates yet${draft.flex === 'exact' ? '. Flexible dates might help' : ''}. You can run a live search with my filters already set:`, [
-      [url('🔎 Search live prices', link)],
-      [btn('📅 Try another month', 'd:dates'), btn('🌏 Similar places', `r:alt:${sid}`)],
-    ]);
+  // No round-trip fare in the free data (or live prices wanted for everything): build the trip
+  // from one-way flights instead, with live Google Flights prices where set up. Never an empty card.
+  if (!ranked.length || liveAlways(env)) {
+    if (!ranked.length) await bump(env, 'searches_empty');
+    const nights = draft.oneWay ? 0 : draft.ret && draft.depart.type === 'date'
+      ? Math.max(1, Math.round((Date.parse(draft.ret.value) - Date.parse(draft.depart.value)) / 86400000))
+      : ({ short: 3, week: 6, long: 10 }[draft.stay] || draft.nights || 6);
+    const trip = { ...draft, multi: [draft.destination], nights: nights || 1 };
+    if (!isGroup) await Promise.all([noteInterest(env, user.id, draft), recordSearch(env, user, draft)]);
+    return runMulti(env, user, chat, trip, { firstName: firstName(user), airline, trackedLink, gearButton, multiCityUrl, groupLabel, paxRows, single: true });
   }
-
   const best = Math.min(...ranked.map((r) => r.it.price));
   const route = `${draft.origin}-${draft.destination}`;
   const month = draft.depart.value.slice(0, 7);

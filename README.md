@@ -1,4 +1,4 @@
-# CityWide Trip Planner — Telegram bot (version 4.2)
+# CityWide Trip Planner — Telegram bot (version 4.9)
 
 Travellers chat with **Maya**, a friendly AI travel assistant (she always says she's an AI if asked). They type a trip in one line; Maya replies with three picks for their group: ⭐ best overall, 💰 cheapest and 🛋️ most comfortable, plus weather and visa notes for their passport, and can watch prices.
 
@@ -6,7 +6,59 @@ Runs free on Cloudflare (Workers, D1, Workers AI) and earns through your Travelp
 
 **Setup:** follow the step-by-step **CityWide Trip Planner — Setup Guide** doc. No commands, nothing to install: only Telegram, GitHub's website and the Cloudflare dashboard.
 
-## What's new in version 4.2
+## What's new in version 4.9 (more of the free Aviasales Data API)
+
+- **Prices found far more often, free:** when the main index (`prices_for_dates`) has nothing, Maya also asks three other Aviasales indexes side by side: `v1/prices/cheap`, `v1/prices/direct` and `get_latest_prices`. Expired prices are skipped. Fares without flight times say "times on the booking page".
+- **/deals:** real low fares from your home city right now (Aviasales special offers), with booking buttons. The best one also appears in /latest.
+- **Nearby airports:** when a flight still has no price, Maya suggests a nearby airport pair that has one (`nearest-places-matrix`).
+- **Exact dates stay exact:** each flight stays within a day of its own planned date.
+
+## Version 4.8
+
+- **Cheaper live prices:** live Google Flights prices now also work through **SearchApi** (searchapi.io, about $4 per 1,000 searches: $40 a month for 10,000; 100 free to try), as well as SerpApi. Add the secret `SEARCHAPI_KEY` and the bot uses it automatically.
+
+## Version 4.7
+
+- **Live prices from Google Flights** (through SerpApi; add the secret `SERPAPI_KEY`): real airlines, flight numbers, departure and arrival times, layovers and prices, marked 🟢 on the card. Used when the free data has nothing near your dates (`LIVE_MODE = "fallback"`), or for every flight (`"always"`). Each answer is kept 6 hours; `LIVE_MONTHLY_MAX` (240, inside SerpApi's free 250 a month) and `LIVE_PER_USER_DAY` (6) protect your allowance; you, the owner, are not limited per day.
+- **Never "Sorry, no prices" again:** if there's no cached round-trip fare, Maya builds the trip from one-way flights (live, cached or clearly marked estimates) and shows ⭐ best overall, 💰 cheapest and ⚡ fastest whole trips with totals, plus one booking link per trip.
+- The daily report shows live searches used this month.
+
+## Version 4.6
+
+- **⚡ Fastest** on single trips too (least time travelling, both ways), next to best overall, cheapest and most comfortable.
+- **Search limits:** 7 a day in someone's first week, 10 a day after (once they've come back on 2+ days), 150 a month. Groups get twice as many, and the person asking in a group also uses their own allowance. You (ADMIN_IDS) have none. New setting names (`SEARCHES_PER_DAY_FIRST_WEEK`, `SEARCHES_PER_DAY`, `SEARCHES_PER_MONTH`), so old numbers in wrangler.toml are ignored.
+- **Traveller profiles** (never for admins): searches, multi-country, one-way, flexible, direct, group size, kids, budget, trip length, how far ahead they search, which option they tap (best / cheapest / fastest / comfort), watches, emails, bookings, favourite countries and months, most active hour, and a one-line segment ("price-focused, travels with kids, plans far ahead"). `/user <id>` shows one person; `/analytics` adds "How people search and choose". `/delete` now erases everything about a person.
+- **Abuse guards:** public pages (booking links, gear page, setup) limited to 10 a minute per visitor; forged buttons ignored; multi-country re-pricing free up to 6 times per route, then counted; a flood of brand-new accounts alerts you at 150 a day and pauses new sign-ups above 600; multi-country trip search kept well inside the free plan's 10 ms of CPU.
+
+## Version 4.5
+
+- **Multi-city trips priced straight away, as whole trips:** ⭐ Best overall, 💰 Cheapest and ⚡ Fastest, each with its total (per person and for the group), every flight in ticket format (airline, flight number, price, date, departure → arrival times, duration, stops) and why it was picked. Options that are the same trip are merged.
+- **One booking link per whole trip** (not per flight); one link when all options share the same dates.
+- **Every leg gets a number:** if no price was seen near your dates, Maya shows a clearly labelled estimate (cheapest seen on another day, or the same route the other way).
+- **Changing nights, group or month re-prices the same route without using another search.**
+- **New trip detection:** "dac malaysia trip" while a Malaysia + Thailand card is open starts a new trip.
+- **AI:** Cloudflare's strongest model, gpt-oss-120b (≈ 50–80 Neurons a message), with Llama 4 Scout as automatic backup.
+- Prices from other markets are asked in your currency, so legs always add up; South-East Asia routes also ask that country's market.
+
+## Version 4.4
+
+- **Multi-city link fixed:** the whole-route button now opens aviasales.com in the format that works (`/search/DAC1101TAS1401IST1801DAC3`).
+- **Prices to compare on every leg:** the cheapest option plus a second one (fewer stops or another airline); when nothing is seen near your dates, "usually from …" with the day it was seen.
+- **A smarter AI that reads the conversation:** Llama 4 Scout (free on Workers AI, ~35 Neurons a call) reads long or unclear messages and replies to an open trip card *with the trip as context* ("can we squeeze one more person in", "sounds good, show me prices"). The rules still handle simple messages instantly and free. Budget: 8,000 of the free 10,000 Neurons a day, 12 AI reads per person per day.
+- **Optional Claude:** add the secret `ANTHROPIC_API_KEY` and set `AI_MODEL` to a Claude model (e.g. `claude-haiku-5-5`). Paid by your Anthropic account, not Cloudflare.
+- More airline names built in (AJet, Centrum Air), and the full list loads automatically.
+
+## Version 4.3
+
+- **Change the trip by chatting:** with a trip card open, "1 adult only no children", "one way", "15 to 20 Jan", "flexible dates", "direct" or "budget 30,000" update that card ("Updated ✅"); "go" or "search" runs it. A new place starts a new trip.
+- **Honest group label:** never "Family with kids · 1 person"; "1 adult" means 1 adult, "no children" means none.
+- **Multi-city as one ticket:** the first button searches the whole route as one multi-city trip on Aviasales (live prices, all airlines and connections). Each flight is listed as a price guide, on the cheapest day near your plan, without cutting a stay short.
+- **More prices found:** asks the likeliest price markets at the same time (e.g. Russian-speaking markets for Central Asia, Turkey's for Turkey); exact dates with no price fall back to the nearest days and say so.
+- **Real airline names** for every code (Travelpayouts' free airline list, refreshed weekly), e.g. C6 = Centrum Air.
+- **Faster:** price checks, database steps and Telegram housekeeping run side by side; a fresh Worker checks one row instead of ~30 setup statements.
+- **You (ADMIN_IDS) have no search or watch limits.**
+
+## Version 4.2
 
 - **Airline first, everywhere:** every option starts with its carrier ("💰 Option 2 · Cheapest · Malaysia Airlines"), and so do the Book buttons and multi-country legs.
 - **E-ticket layout:** "🛫 Thu, 10 Dec · 21:00 Dhaka → 02:00 (+1) Bangkok", the same for the return.
@@ -91,6 +143,8 @@ Runs free on Cloudflare (Workers, D1, Workers AI) and earns through your Travelp
 | `src/watch.js` | Price watches and alerts |
 | `src/admin.js` | `/stats`, `/ban`, `/grant`, `/routecheck`, daily report |
 | `src/analytics.js` | `/analytics` for the owner |
+| `src/profile.js` | Traveller profiles, segments, `/user` |
+| `src/live.js` | Live Google Flights prices (SerpApi) |
 | `src/db.js` | Database tables (created and upgraded automatically) |
 | `tools/build-visa-data.mjs`, `tools/build-world-data.mjs` | Rebuild the visa and airport tables (developer only) |
 | `test/` | Automated tests (developer only) |
