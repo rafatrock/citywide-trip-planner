@@ -526,7 +526,7 @@ async function runSearch(env, user, chat, draft, isGroup) {
   const shareText = `✈️ ${placeName(draft.origin)} → ${placeName(draft.destination)}, ${fmtDay(top.departure_at)}: from ${money(top.price, res.currency)} per person (${airline(top.airline)}, ${top.transfers === 0 ? 'direct' : `${top.transfers} stop`}). Found by Maya on CityWide Trip Planner${shareHref ? `: ${shareHref}` : ''}`;
   second.push(url('📤 Share on WhatsApp', `https://wa.me/?text=${encodeURIComponent(shareText)}`));
   keyboard.push(second);
-  if (!isGroup && user.email) keyboard.push([btn('📧 Email me this plan', `r:em:${searchId}`)]);
+  if (!isGroup && user.email && emailReady(env)) keyboard.push([btn('📧 Email me this plan', `r:em:${searchId}`)]);
   // one money-making extra that fits this trip (only programs you've joined)
   const ctx = toolkitContext(draft, ranked[0].it);
   ctx.lateArrival = ranked.some((r) => r.late);

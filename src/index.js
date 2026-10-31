@@ -41,13 +41,19 @@ async function setup(env, request) {
   const me = await tg(env, 'getMe', {});
   if (!me.ok) return html('<h2>Telegram token not accepted</h2><p>Check TELEGRAM_BOT_TOKEN (copy it again from @BotFather).</p>', 400);
   await setConfig(env, 'bot_username', me.result.username);
-  const hook = await tg(env, 'setWebhook', {
-    url: `${origin}/tg`,
-    secret_token: env.TG_WEBHOOK_SECRET,
-    allowed_updates: ['message', 'callback_query'],
-    drop_pending_updates: true,
-    max_connections: 20,
-  });
+  // Telegram sometimes can't look up a workers.dev address for a few minutes: try 3 times.
+  let hook;
+  for (let i = 0; i < 3; i += 1) {
+    hook = await tg(env, 'setWebhook', {
+      url: `${origin}/tg`,
+      secret_token: env.TG_WEBHOOK_SECRET,
+      allowed_updates: ['message', 'callback_query'],
+      drop_pending_updates: false, // keep messages people sent while the bot was being updated
+      max_connections: 20,
+    });
+    if (hook.ok) break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
   await tg(env, 'setMyCommands', {
     commands: [
       { command: 'plan', description: 'Plan a new trip' },
@@ -65,10 +71,20 @@ async function setup(env, request) {
   });
   await tg(env, 'setMyDescription', { description: 'Tell me who is travelling and where. I find the best flights for your group, explain why, and watch prices for you.' });
   await tg(env, 'setMyShortDescription', { short_description: 'Flights picked for your group: family, friends, solo, business. Free price alerts.' });
+  const info = await tg(env, 'getWebhookInfo', {});
+  const w = info.ok ? info.result : {};
+  const dns = /resolve host|name resolution/i.test(hook.description || '');
+  const help = hook.ok ? '' : dns
+    ? `<p><b>What this means:</b> Telegram's servers couldn't look up your bot's address just now. Your code and settings are fine. Wait 10–15 minutes and open this page again. If it keeps happening for more than an hour, give the bot your own address (Setup Guide, Part F5); that is the lasting fix.</p>`
+    : '<p>Check <b>TG_WEBHOOK_SECRET</b> (letters, numbers, _ and - only) and try again.</p>';
+  const lastErr = w.last_error_date ? `<p>Telegram's last delivery problem: ${new Date(w.last_error_date * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC — ${String(w.last_error_message || '').replace(/[<>&]/g, '')}</p>` : '';
   return html(`<h2>${hook.ok ? '✅ Connected' : '❌ Could not connect'}</h2>
 <p>Bot: <a href="https://t.me/${me.result.username}">@${me.result.username}</a></p>
-<p>Webhook: <code>${origin}/tg</code>${hook.ok ? '' : ` — ${hook.description || 'error'}`}</p>
-<p>Database: ready. Open the bot in Telegram and send <b>/start</b>.</p>`);
+<p>Webhook: <code>${origin}/tg</code>${hook.ok ? '' : ` — ${String(hook.description || 'error').replace(/[<>&]/g, '')}`}</p>
+${help}
+<p>Telegram's saved address: <code>${String(w.url || '(none)').replace(/[<>&]/g, '')}</code> · messages waiting: ${w.pending_update_count ?? '?'}</p>
+${lastErr}
+<p>Database: ready.${hook.ok ? ' Open the bot in Telegram and send <b>/start</b>.' : ''}</p>`);
 }
 
 // Each message or cron run gets its own copy of env with a call budget (free plan: 50).

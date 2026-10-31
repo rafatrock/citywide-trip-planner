@@ -124,3 +124,24 @@ test('per-person monthly limit and the admin analytics', async () => {
   await post(env, privateMsg('/stats', admin));
   assert.match(lastText(log), /Emails sent: \d+ \/ 90 \(codes \d+, plans \d+\)/);
 });
+
+test('setup page: retries and explains a Telegram look-up failure', async () => {
+  const log = installFetch();
+  const real = globalThis.fetch;
+  let tries = 0;
+  globalThis.fetch = async (input, opts) => {
+    const u = String(typeof input === 'string' ? input : input.url);
+    if (u.endsWith('/setWebhook')) { tries += 1; return new Response(JSON.stringify({ ok: false, description: 'Bad Request: bad webhook: Failed to resolve host: Temporary failure in name resolution' })); }
+    if (u.endsWith('/getWebhookInfo')) return new Response(JSON.stringify({ ok: true, result: { url: `${BASE}/tg`, pending_update_count: 3, last_error_date: 1793430000, last_error_message: 'Failed to resolve host' } }));
+    return real(input, opts);
+  };
+  const env = makeEnv();
+  const res = await worker.fetch(new Request(`${BASE}/setup?key=${env.SETUP_KEY}`), env, ctx());
+  const page = await res.text();
+  globalThis.fetch = real;
+  assert.equal(tries, 3);
+  assert.match(page, /Could not connect/);
+  assert.match(page, /couldn't look up your bot's address/);
+  assert.match(page, /messages waiting: 3/);
+  assert.ok(log);
+});
