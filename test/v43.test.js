@@ -82,7 +82,7 @@ test('multi-city: Uzbekistan and Turkey, one-ticket search, stays keep their nig
   assert.match(res.body.text, /Backpacker \/ budget · 3 people/);
   console.log(`\n---- multi result ----\n${res.body.text}\n----------------------`);
   assert.match(res.body.text, /BEST OVERALL|CHEAPEST/);
-  const whole = buttons(res).find((b) => / Book( the whole)? trip/.test(b.text));
+  const whole = buttons(res).find((b) => /book( the whole)? trip/i.test(b.text));
   const target = env.DB.raw.prepare('SELECT url FROM links WHERE id = ?').get(whole.url.split('/go/')[1]).url;
   const m = target.match(/\/search\/DAC(\d{4})TAS(\d{4})IST(\d{4})DAC3\?marker=/);
   assert.ok(m, target);

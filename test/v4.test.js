@@ -48,7 +48,7 @@ test('the screenshot: a 3-country backpacker trip works, no loop', async () => {
   assert.match(res.body.text, /Turkmenistan: visa needed from the embassy/);
   assert.ok(buttons(res).some((b) => b.callback_data === 'd:mrm:ASB'), 'can drop a country');
   assert.ok(!buttons(res).some((b) => /Book leg|^\d\) /.test(b.text)), 'no single-flight links, whole trips only');
-  const whole = buttons(res).find((b) => / Book( the whole)? trip/.test(b.text));
+  const whole = buttons(res).find((b) => /book( the whole)? trip/i.test(b.text));
   assert.ok(whole, 'a whole-trip booking link');
   const go = whole.url.split('/go/')[1];
   const target = env.DB.raw.prepare('SELECT url FROM links WHERE id = ?').get(go).url;

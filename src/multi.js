@@ -282,6 +282,14 @@ export async function runMulti(env, user, chat, d, h) {
     if (e && e.cur === cur) est[i] = e;
   }));
   const estTotal = Object.values(est).reduce((s, e) => s + e.price, 0);
+  // A simple return trip with nothing real: the honest guide is a real RETURN fare seen on this route
+  // (any dates), not a one-way price with the way back missing.
+  let rtGuide = null;
+  const simpleReturn = legs.length === 2 && legs[1].to === legs[0].from && !best.picks.some((p) => p.view);
+  if (simpleReturn) {
+    const r = await searchFares(env, { origin: legs[0].from, destination: legs[0].to, depart: null, oneWay: false, currency });
+    if (r.items.length && r.currency === cur) rtGuide = r.items.filter((x) => x.return_at).reduce((a, b) => (b.price < a.price ? b : a), r.items[0]);
+  }
   let nearbyTip = '';
   const firstMissing = missing.find((i) => !est[i]) ?? missing[0];
   if (firstMissing !== undefined) {
@@ -323,8 +331,17 @@ export async function runMulti(env, user, chat, d, h) {
     }
     const real = o.t.picks.some((p) => p.view);
     if (!real) {
-      lines.push('', `🧭 <b>PRICE GUIDE · ≈ ${money(total, cur)}</b>${pax > 1 ? ` <i>(≈ ${money(total * pax, cur)} for ${pax})</i>` : ''}`,
-        '<i>No fares seen yet for these dates. This guide comes from other days; the button below searches every airline live.</i>');
+      if (rtGuide) {
+        lines.push('', `🧭 <b>PRICE GUIDE · return tickets from ≈ ${money(rtGuide.price, cur)}</b> per person${pax > 1 ? ` <i>(≈ ${money(rtGuide.price * pax, cur)} for ${pax})</i>` : ''}`,
+          `<i>No fares seen yet for your dates. On this route, travellers recently found return tickets from this price (${day(rtGuide.departure_at)} → ${day(rtGuide.return_at)}${rtGuide.airline ? `, ${esc(h.airline(rtGuide.airline))}` : ''}). Prices change by season, so tap below for your dates live.</i>`);
+        continue;
+      }
+      const allKnown = o.t.picks.every((p, i) => est[i]);
+      // a total only when every flight has a guide price; otherwise say plainly what's missing
+      lines.push('', allKnown
+        ? `🧭 <b>PRICE GUIDE · ≈ ${money(total, cur)}</b>${pax > 1 ? ` <i>(≈ ${money(total * pax, cur)} for ${pax})</i>` : ''}`
+        : `🧭 <b>PRICE GUIDE</b> <i>(not a full trip price: ${o.t.picks.filter((p, i) => !est[i]).length} of ${o.t.picks.length} flights have no price seen yet)</i>`,
+      '<i>No fares seen yet for these dates. This guide comes from other days; the button below searches every airline live.</i>');
       o.t.picks.forEach((p, i) => {
         const n = NUM[i] || `${i + 1})`;
         lines.push(est[i] ? `${n} ${day(p.leg.date)} · ${p.leg.from} → ${p.leg.to} · ≈ ${money(est[i].price, cur)} <i>(${esc(est[i].how)})</i>`
@@ -399,7 +416,8 @@ export async function runMulti(env, user, chat, d, h) {
         : h.multiCityUrl(env, ls, pax);
     const have = links.find((l) => l.href === href);
     if (have) { have.labels.push(...o.labels); continue; }
-    links.push({ href, labels: [...o.labels], icon: o.icon, total: o.t.picks.some((p) => p.view) ? totalOf(o.t) + estTotal : 0 });
+    const complete = o.t.picks.every((p, i) => p.view || est[i]);
+    links.push({ href, labels: [...o.labels], icon: o.icon, total: o.t.picks.some((p) => p.view) && complete ? totalOf(o.t) + estTotal : 0 });
   }
   const tracked = await Promise.all(links.map((l) => h.trackedLink(env, l.href, user.id, 'live', { origin: d.origin, destination: d.multi[0], depart: legs[0].date, multi: true, label: l.labels[0] })));
   links.forEach((l, i) => {

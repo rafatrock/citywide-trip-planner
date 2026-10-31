@@ -535,7 +535,7 @@ function confirmKeyboard(d, visaCc, visaStatus) {
   const kb = [[btn('✅ Search', 'd:go')]];
   if (d.paxGuess) kb.push(...paxRows(d));
   // ✅ marks only what the traveller actually told us; either answer can be changed any time
-  if (visaCc) kb.push([btn(`${visaStatus === 'yes' ? '✅ ' : '🛂 '}I have a ${countryName(visaCc)} visa`, `d:visa:yes:${visaCc}`), btn(`${visaStatus === 'no' ? '✅ ' : ''}No visa yet`, `d:visa:no:${visaCc}`)]);
+  if (visaCc) kb.push([btn(`${visaStatus === 'yes' ? '✅ ' : '🛂 '}I have ${/^[AEIOU]/.test(countryName(visaCc)) ? 'an' : 'a'} ${countryName(visaCc)} visa`, `d:visa:yes:${visaCc}`), btn(`${visaStatus === 'no' ? '✅ ' : ''}No visa yet`, `d:visa:no:${visaCc}`)]);
   kb.push([btn(`${d.oneWay ? '' : '✅ '}⇄ Return`, 'd:way:rt'), btn(`${d.oneWay ? '✅ ' : ''}→ One way`, 'd:way:ow')]);
   if (!d.oneWay && !d.ret && (d.depart.type === 'month' || d.flex === 'month')) {
     const mark = (k) => ((d.stay || 'any') === k ? '✅ ' : '');
