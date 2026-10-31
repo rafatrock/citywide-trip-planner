@@ -1,10 +1,20 @@
-# CityWide Trip Planner — Telegram bot (version 4.9.2)
+# CityWide Trip Planner — Telegram bot (version 4.9.4)
 
 Travellers chat with **Maya**, a friendly AI travel assistant (she always says she's an AI if asked). They type a trip in one line; Maya replies with three picks for their group: ⭐ best overall, 💰 cheapest and 🛋️ most comfortable, plus weather and visa notes for their passport, and can watch prices.
 
 Runs free on Cloudflare (Workers, D1, Workers AI) and earns through your Travelpayouts account.
 
 **Setup:** follow the step-by-step **CityWide Trip Planner — Setup Guide** doc. No commands, nothing to install: only Telegram, GitHub's website and the Cloudflare dashboard.
+
+## What's new in version 4.9.4
+
+- **Fix: "Too many subrequests" (no reply on quiet routes like Dhaka → Sydney).** An edge cache made two hidden outside calls per price lookup that weren't counted against the free plan's 50 per message. It's removed (the database cache does the job), the budget keeps 5 spare, and the worst case (no prices anywhere, every fallback tried) now uses 40 calls and still answers.
+- **Never silent:** if a reply ever fails, Maya says sorry and asks to try again.
+
+## What's new in version 4.9.3
+
+- **A visa never blocks flights:** answering "No visa yet" goes straight to the flights, with how to apply. It's the traveller's call; Maya only informs.
+- **Change your visa answer any time:** every trip card for a country that needs a visa keeps the visa buttons, with ✅ only on what you actually told Maya (nothing pre-ticked). /visas still lists and forgets answers.
 
 ## What's new in version 4.9.2
 

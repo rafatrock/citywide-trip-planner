@@ -506,7 +506,9 @@ async function continueDraft(env, user, chat, draft, isGroup) {
   const vmap = await countryVisaMap(env, user.id);
   const destCc = placeByCode(draft.destination)?.cc;
   const askVisa = shouldAskVisa(list(user.passports), list(user.visas), destCc, vmap) ? destCc : null;
-  return send(env, chat.id, pre + summary(env, user, draft, vmap, askVisa), confirmKeyboard(draft, askVisa));
+  // a visa row on the card whenever this destination needs one, so the answer can always be changed
+  const visaCc = askVisa || (shouldAskVisa(list(user.passports), list(user.visas), destCc, {}) ? destCc : null);
+  return send(env, chat.id, pre + summary(env, user, draft, vmap, askVisa), confirmKeyboard(draft, visaCc, vmap[visaCc]));
 }
 
 // The label must match the people: no "Family with kids · 1 person".
@@ -529,10 +531,11 @@ function paxRows(d) {
   return rowsOut;
 }
 
-function confirmKeyboard(d, askVisa) {
+function confirmKeyboard(d, visaCc, visaStatus) {
   const kb = [[btn('✅ Search', 'd:go')]];
   if (d.paxGuess) kb.push(...paxRows(d));
-  if (askVisa) kb.push([btn(`✅ I have a ${countryName(askVisa)} visa`, `d:visa:yes:${askVisa}`), btn('No visa yet', `d:visa:no:${askVisa}`)]);
+  // ✅ marks only what the traveller actually told us; either answer can be changed any time
+  if (visaCc) kb.push([btn(`${visaStatus === 'yes' ? '✅ ' : '🛂 '}I have a ${countryName(visaCc)} visa`, `d:visa:yes:${visaCc}`), btn(`${visaStatus === 'no' ? '✅ ' : ''}No visa yet`, `d:visa:no:${visaCc}`)]);
   kb.push([btn(`${d.oneWay ? '' : '✅ '}⇄ Return`, 'd:way:rt'), btn(`${d.oneWay ? '✅ ' : ''}→ One way`, 'd:way:ow')]);
   if (!d.oneWay && !d.ret && (d.depart.type === 'month' || d.flex === 'month')) {
     const mark = (k) => ((d.stay || 'any') === k ? '✅ ' : '');
@@ -572,7 +575,9 @@ function summary(env, user, d, vmap = {}, askVisa = null) {
   const destCc = placeByCode(d.destination)?.cc;
   const v = visaFor(list(user.passports), list(user.visas), destCc, yesCountries(vmap));
   if (askVisa) {
-    lines.push(`\n🛂 ${esc(countryName(askVisa))} needs ${v?.code === 'E' ? 'an e-visa' : 'a visa'} for your passport. Do you already have a valid one? (I'll remember for next time.)`);
+    lines.push(`\n🛂 ${esc(countryName(askVisa))} needs ${v?.code === 'E' ? 'an e-visa' : 'a visa'} for your passport. Do you already have a valid one? Either way I'll show you flights; this only changes the visa notes.`);
+  } else if (vmap[destCc] === 'no') {
+    lines.push(`\n🛂 ${esc(countryName(destCc))}: you don't have a visa yet. That's fine: here are the flights, and I'll show how to apply. Got one now? Tap below.`);
   } else if (needsEmbassy(v) && vmap[destCc] !== 'yes') {
     lines.push(`\n⚠️ Heads-up: ${esc(countryName(destCc))} needs ${v.code === 'N' ? 'special permission' : 'an embassy visa'} for your passport. That can take weeks, so apply early. Tap 🌏 Easier places after searching for visa-friendly ideas.`);
   }
@@ -893,10 +898,16 @@ async function onCallback(env, cq) {
     if (a === 'stay' && (STAYS[b] || b === 'any')) { draft.stay = b === 'any' ? null : b; delete draft.nights; return continueDraft(env, user, chat, draft, false); }
     if (a === 'visa') {
       const cc = data.split(':')[3];
+      let first = false;
       if (/^[A-Z]{2}$/.test(cc) && ['yes', 'no'].includes(b)) {
+        first = !(await countryVisaMap(env, user.id))[cc];
         await setCountryVisa(env, user.id, cc, b);
         await bump(env, `visa_answer_${b}`);
       }
+      // a visa never blocks the search: the first answer goes straight to the flights;
+      // changing it later just updates the card (with the new visa notes)
+      const stayOpen = !draft.oneWay && !draft.ret && (draft.depart?.type === 'month' || draft.flex === 'month') && !draft.stay;
+      if (first && draft.destination && draft.depart && !draft.paxGuess && !stayOpen) return runSearch(env, user, chat, draft, false);
       return continueDraft(env, user, chat, draft, false);
     }
     if (a === 'dates') return send(env, chat.id, 'Which month?', rows(nextMonths(6).map((m) => btn(fmtMonth(m), `d:m:${m}`)), 2));

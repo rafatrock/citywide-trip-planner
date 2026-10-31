@@ -8,28 +8,11 @@ import { placeByCode } from './places.js';
 const API = 'https://api.travelpayouts.com/aviasales/v3/prices_for_dates';
 const CACHE_TTL = 6 * 3600; // Travelpayouts recommends caching; 6 h keeps alerts fresh enough
 
-// Edge cache (free, per data centre). Works when the Worker runs on your own
-// domain; on workers.dev it simply finds nothing and we fall back to D1.
-async function edgeGet(key) {
-  try {
-    const r = await caches.default.match(`https://cache.citywide.internal/${encodeURIComponent(key)}`);
-    return r ? await r.json() : null;
-  } catch { return null; }
-}
-async function edgePut(key, value, ttl) {
-  try {
-    await caches.default.put(`https://cache.citywide.internal/${encodeURIComponent(key)}`,
-      new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${ttl}` } }));
-  } catch { /* not available */ }
-}
+// (An edge cache used to sit here. Each of its reads and writes counted as an outside call against
+// the free plan's 50 per message, so it was removed; the database cache below does the job.)
 
 async function callApi(env, params, url = API) {
   const key = `tp:${url === API ? '' : `${url.split('/').slice(-2).join('/')}:`}${new URLSearchParams(params).toString()}`;
-  const edge = await edgeGet(key);
-  if (edge) {
-    await bump(env, 'tp_cache_hits');
-    return edge;
-  }
   // cache and today's call count in one go (each database trip costs time)
   const [cached, used] = await Promise.all([cacheGet(env, key), counter(env, 'tp_calls')]);
   if (cached) {
@@ -62,7 +45,7 @@ async function callApi(env, params, url = API) {
   const out = { success: !!body.success, currency: body.currency || params.currency, data, ...(prices ? { prices } : {}) };
   const has = Array.isArray(data) ? data.length : Object.keys(data).length || (prices && prices.length);
   const ttl = has ? CACHE_TTL : 2 * 3600;
-  await Promise.all([cacheSet(env, key, out, ttl), edgePut(key, out, ttl)]);
+  await cacheSet(env, key, out, ttl);
   return out;
 }
 

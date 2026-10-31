@@ -111,8 +111,8 @@ const COMMANDS = [
       { command: 'delete', description: 'Delete my data' },
     ];
 
-// Each message or cron run gets its own copy of env with a call budget (free plan: 50).
-const withBudget = (env, max = 50) => Object.assign(Object.create(env), { __sub: { used: 0, max } });
+// Each message or cron run gets its own copy of env with a call budget (free plan: 50; we keep 5 spare).
+const withBudget = (env, max = 45) => Object.assign(Object.create(env), { __sub: { used: 0, max } });
 
 export default {
   async fetch(request, rawEnv, ctx) {
@@ -131,6 +131,13 @@ export default {
               await handleUpdate(env, update);
             } catch (e) {
               console.log('update failed', e && e.stack ? e.stack : e);
+              // never go silent: tell the person (a fresh call budget, one message)
+              const chatId = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
+              if (chatId) {
+                try {
+                  await tg(withBudget(rawEnv), 'sendMessage', { chat_id: chatId, text: 'Sorry, I hit a snag with that one 🙈 Please try again in a minute, or change the dates a little.' });
+                } catch { /* nothing more we can do */ }
+              }
             }
           })());
         }
