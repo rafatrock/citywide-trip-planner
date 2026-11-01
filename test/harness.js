@@ -31,7 +31,7 @@ export function makeEnv(overrides = {}) {
     ADMIN_IDS: '999',
     ADMIN_CHAT_ID: '999',
     AI_DAILY_MAX: '800',
-    TP_DAILY_MAX: '3000',
+    TP_CALLS_PER_DAY: '20000',
     NEW_SEARCHES_PER_DAY: '5',
     NEW_WATCHES_PER_DAY: '1',
     TRUSTED_SEARCHES_PER_DAY: '10',
@@ -60,7 +60,7 @@ function fixture(params) {
   const s = fares.scale;
   const mk = (price, transfers, dep, dur, ret) => ({
     origin: params.get('origin'), destination: params.get('destination'), price: Math.round(price * s), airline: transfers ? 'MH' : 'TG', flight_number: String(price),
-    departure_at: dep, return_at: ret, transfers, return_transfers: transfers, duration_to: dur, duration: dur * 2,
+    departure_at: dep, return_at: ret, transfers, return_transfers: transfers, duration_to: dur, duration_back: dur, duration: dur * 2,
     link: `/search/DAC1012BKK1712?t=fake${price}`,
   });
   return [

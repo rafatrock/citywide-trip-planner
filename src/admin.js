@@ -27,7 +27,7 @@ export async function buildReport(env, day) {
       (SELECT COUNT(*) FROM users WHERE phone IS NOT NULL) AS phones,
       (SELECT COUNT(*) FROM users WHERE marketing = 1) AS optins`).first();
   const aiMax = Number(env.AI_DAILY_MAX || 800);
-  const tpMax = Number(env.TP_DAILY_MAX || 3000);
+  const tpMax = Number(env.TP_CALLS_PER_DAY || 20000);
   const tpTotal = g('tp_calls') + g('tp_cache_hits');
   const caps = emailCaps(env);
   const emMonth = await counter(env, 'emails_sent', monthKey(new Date(`${day}T12:00:00Z`)));

@@ -11,16 +11,26 @@ const CACHE_TTL = 6 * 3600; // Travelpayouts recommends caching; 6 h keeps alert
 // (An edge cache used to sit here. Each of its reads and writes counted as an outside call against
 // the free plan's 50 per message, so it was removed; the database cache below does the job.)
 
+// Fresh data: by default nothing is stored between messages (TP_CACHE_MINUTES = 0), so every search
+// asks Aviasales again. Within one message the same request is only sent once.
 async function callApi(env, params, url = API) {
   const key = `tp:${url === API ? '' : `${url.split('/').slice(-2).join('/')}:`}${new URLSearchParams(params).toString()}`;
-  // cache and today's call count in one go (each database trip costs time)
-  const [cached, used] = await Promise.all([cacheGet(env, key), counter(env, 'tp_calls')]);
+  env.__memo ??= new Map();
+  if (env.__memo.has(key)) return env.__memo.get(key);
+  const p = callApiFresh(env, params, url, key);
+  env.__memo.set(key, p);
+  return p;
+}
+
+async function callApiFresh(env, params, url, key) {
+  const keepMin = Number(env.TP_CACHE_MINUTES || 0);
+  const [cached, used] = await Promise.all([keepMin > 0 ? cacheGet(env, key) : null, counter(env, 'tp_calls')]);
   if (cached) {
     await bump(env, 'tp_cache_hits');
     return cached;
   }
   if (!canFetch(env)) return { budget: true, data: [] };
-  if (used >= Number(env.TP_DAILY_MAX || 3000)) return { capped: true, data: [] };
+  if (used >= Number(env.TP_CALLS_PER_DAY || 20000)) return { capped: true, data: [] };
   let body;
   try {
     const [res] = await Promise.all([
@@ -44,9 +54,35 @@ async function callApi(env, params, url = API) {
   const prices = Array.isArray(body.prices) ? body.prices : (Array.isArray(body.data?.prices) ? body.data.prices : undefined);
   const out = { success: !!body.success, currency: body.currency || params.currency, data, ...(prices ? { prices } : {}) };
   const has = Array.isArray(data) ? data.length : Object.keys(data).length || (prices && prices.length);
-  const ttl = has ? CACHE_TTL : 2 * 3600;
-  await cacheSet(env, key, out, ttl);
+  if (keepMin > 0) await cacheSet(env, key, out, has ? keepMin * 60 : Math.min(keepMin * 60, 1800));
   return out;
+}
+
+// Real door-to-door times. Checked against the live API (Dhaka → Istanbul, 1 Nov 2026):
+//   `duration`                      = the whole journey INCLUDING stopovers (both ways on a return ticket)
+//   `duration_to` / `duration_back` = time IN THE AIR only (equal to the journey only when non-stop)
+// e.g. IndiGo one way: duration_to 650 (10h 50m flying) but duration 1810 (30h 10m door to door).
+// We keep a one-way time only when it is really known, so Maya never shows flying time as travel time.
+export function realTimes(it) {
+  if (!it || it.timeless || it.live || !it.duration) return it;
+  const airTo = it.duration_to || 0;
+  const airBack = it.duration_back || 0;
+  const stops = (it.transfers || 0) + (it.return_at ? it.return_transfers || 0 : 0);
+  let to;
+  let back;
+  let wait;
+  if (!it.return_at) {
+    to = it.duration; // one way: the journey time is known
+    if (stops && airTo) wait = Math.max(0, it.duration - airTo);
+  } else {
+    if (!stops) { to = airTo; back = airBack || (airTo ? it.duration - airTo : 0); } // non-stop: flying time is the journey
+    else if (airTo && airBack && it.duration <= airTo + airBack) { to = airTo; back = airBack; } // no time on the ground
+    else if (!it.transfers && airTo) { to = airTo; back = it.duration - airTo; } // non-stop out: the rest is the way back
+    else if (!it.return_transfers && airBack) { back = airBack; to = it.duration - airBack; }
+    // stops both ways: only the total is known, plus how long is spent waiting at stopovers
+    if (stops && airTo && airBack) wait = Math.max(0, it.duration - airTo - airBack);
+  }
+  return { ...it, duration_to: to || undefined, duration_back: back || undefined, air_to: airTo, air_back: airBack, stopover_wait: wait };
 }
 
 // Markets where travellers search a region's routes most (Central Asia and the Caucasus: Russian-speaking markets).
@@ -72,7 +108,7 @@ export async function searchFares(env, q) {
     direct: q.direct ? 'true' : 'false',
     sorting: 'price',
     unique: 'false',
-    limit: '30',
+    limit: q.quick ? '30' : '200', // more fares per market = more airlines to choose from (max 1000)
     page: '1',
   };
   if (!q.oneWay && q.ret) base.return_at = q.ret;
@@ -82,7 +118,11 @@ export async function searchFares(env, q) {
   const cur = (q.currency || 'usd').toLowerCase();
   const region = regionMarket(q.origin, q.destination);
   const fallbacks = String(env.TP_FALLBACK_MARKETS || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const wave1 = [{ currency: cur, market: null }, { currency: cur, market: region || fallbacks[0] || 'us' }];
+  // All likely markets at once (each market's travellers find different airlines): the route's own
+  // market, the region's, the Gulf (hub airlines like Qatar, Emirates, Air Arabia) and the fallbacks.
+  const gulfHub = ['BD', 'IN', 'PK', 'NP', 'LK'].includes(placeByCode(q.origin)?.cc) || ['BD', 'IN', 'PK', 'NP', 'LK'].includes(placeByCode(q.destination)?.cc);
+  const wave1 = [...new Set([null, region, gulfHub ? 'ae' : null, ...fallbacks].filter((m, i) => i === 0 || m))].slice(0, 4)
+    .map((m) => ({ currency: cur, market: m }));
   const used = new Set(wave1.map((a) => a.market));
   const wave2 = [...new Set([...(region ? [fallbacks[0]] : []), ...fallbacks.slice(region ? 0 : 1), ...(region ? REGION_EXTRA[region] || [] : [])])]
     .filter((m) => m && !used.has(m)).slice(0, 1).map((m) => ({ currency: cur, market: m }));
@@ -101,7 +141,7 @@ export async function searchFares(env, q) {
     const hit = results.map((r, i) => ({ r, i })).filter(({ r }) => Array.isArray(r.data) && r.data.length);
     if (hit.length) {
       const cur0 = (hit[0].r.currency || wave[hit[0].i].currency).toLowerCase();
-      const items = hit.filter(({ r, i }) => (r.currency || wave[i].currency).toLowerCase() === cur0).flatMap(({ r }) => r.data);
+      const items = hit.filter(({ r, i }) => (r.currency || wave[i].currency).toLowerCase() === cur0).flatMap(({ r }) => r.data).map(realTimes);
       return { items, currency: cur0, market: hit.map(({ i }) => wave[i].market || 'default').join('+') };
     }
     if (results.every((r) => r.budget)) return { items: [], currency: cur, budget: true };

@@ -1,18 +1,41 @@
-// Ranks fares the way an experienced friend would for THIS group,
-// and writes the short "why" for each pick. Pure functions (easy to test).
+// Picks flights the way a seasoned traveller would, with one simple rule:
+//
+//   💰 Cheapest  = the lowest price.
+//   ⚡ Fastest   = the least time travelling.
+//   ⭐ Best overall = the best balance of price, time and airline quality:
+//        score = price ÷ cheapest price  +  time ÷ fastest time  −  airline quality   (lowest wins)
+//
+// Airline quality comes from Skytrax passenger reviews (src/airline-ratings.js), compared with the
+// average airline: well-rated airlines (Qatar, Singapore, ANA…) count in their favour; budget
+// airlines with no reviews count a little against. The traveller type only changes how much each
+// part counts (backpackers care most about price, families and business trips more about quality).
+// Pure functions (easy to test).
 
+import { RATINGS, RATINGS_AVG } from './airline-ratings.js';
+
+// price, time, quality = how much each part counts; night = extra for landing between 23:00 and 05:00
 export const PERSONAS = {
-  family: { label: 'Family with kids', price: 1.0, stops: 0.6, duration: 0.5, lateArrival: 0.9, earlyDeparture: 0.6, maxStops: 1 },
-  friends: { label: 'Friends group', price: 2.0, stops: 0.3, duration: 0.3, lateArrival: 0.25, earlyDeparture: 0.2, maxStops: 2 },
-  backpacker: { label: 'Backpacker / budget', price: 4.0, stops: 0.15, duration: 0.15, lateArrival: 0.1, earlyDeparture: 0.05, maxStops: 3 },
-  women: { label: "Women's group", price: 1.0, stops: 0.4, duration: 0.3, lateArrival: 1.1, earlyDeparture: 0.3, maxStops: 2 },
-  couple: { label: 'Couple', price: 1.0, stops: 0.4, duration: 0.4, lateArrival: 0.4, earlyDeparture: 0.3, maxStops: 2 },
-  corporate: { label: 'Business trip', price: 0.5, stops: 0.9, duration: 0.8, lateArrival: 0.3, earlyDeparture: 0.4, maxStops: 1 },
+  family: { label: 'Family with kids', price: 1, time: 1.2, quality: 1.3, night: 0.3 },
+  friends: { label: 'Friends group', price: 1.2, time: 1, quality: 1, night: 0 },
+  backpacker: { label: 'Backpacker / budget', price: 3, time: 0.4, quality: 0.3, night: 0 },
+  women: { label: "Women's group", price: 1, time: 1, quality: 1, night: 0.3 },
+  couple: { label: 'Couple', price: 1, time: 1, quality: 1, night: 0.1 },
+  corporate: { label: 'Business trip', price: 0.6, time: 1.5, quality: 1.2, night: 0.2 },
 };
 
-const LATE_FROM = 23; // arrivals from 23:00 ...
-const LATE_TO = 5; // ... to 04:59 count as late night
-const EARLY_DEP = 6; // departures before 06:00 are very early
+// Budget airlines (low fares; bags, meals and seats often extra). Used for the "check baggage" note,
+// and as a small minus when there are no passenger reviews for them.
+const BUDGET = new Set(['G9', '3L', 'AK', 'FD', 'QZ', 'Z2', 'D7', 'XJ', '6E', 'SG', 'IX', 'QP', 'FZ', 'J9', 'OV', 'XY', 'F3', 'VZ', 'VJ', 'TR',
+  '3K', 'JQ', 'GK', 'MM', 'BC', '5J', 'DG', 'SL', 'DD', 'FR', 'U2', 'W6', 'VY', 'PC', 'XQ', 'HV', 'TO', 'NK', 'F9', 'WN', 'B6', 'G4', 'W4', '5W', 'OD', 'JT', 'ID', 'LJ', '7C', 'TW', 'BX']);
+export const isBudget = (code) => BUDGET.has(code);
+
+// Airline quality from -0.6 (much worse than average) to +1 (much better), 0 = average or unknown.
+export function quality(code) {
+  const r = RATINGS[code];
+  if (!r) return BUDGET.has(code) ? -0.3 : 0;
+  return Math.max(-0.6, Math.min(1, (r[0] - RATINGS_AVG) / 3));
+}
+export const tierOf = (code) => (quality(code) >= 0.4 ? 'top' : BUDGET.has(code) ? 'budget' : 'standard');
 
 export function localParts(iso) {
   // "2026-12-12T09:15:00+06:00" -> local wall-clock parts as written
@@ -27,23 +50,16 @@ export function arrivalLocal(departIso, minutes, destTz) {
 }
 
 const nightsBetween = (a, b) => Math.round((Date.parse(b.slice(0, 10)) - Date.parse(a.slice(0, 10))) / 86400000);
-
-export function comfortScore(s, minPrice, minDur) {
-  const dur = s.it.duration_to || s.it.duration || 0;
-  return s.stops * 1.0
-    + (dur && minDur ? (dur / minDur - 1) * 0.8 : 0)
-    + (s.late ? 1.2 : 0)
-    + (s.early ? 0.8 : 0)
-    + (s.it.price / minPrice > 1.6 ? 1 : 0); // comfort, but not at any price
-}
-
 const inWindow = (iso, w) => !w || (iso && iso.slice(0, 10) >= w.from && iso.slice(0, 10) <= w.to);
+// total time travelling: both ways for a return trip
+const travelTime = (it) => (it.return_at && it.duration ? it.duration : (it.duration_to || it.duration || 0));
+const hm = (m) => `${Math.floor(m / 60)}h${m % 60 ? ` ${String(m % 60).padStart(2, '0')}m` : ''}`;
 
 export function rankFares(items, ctx) {
-  const p = PERSONAS[ctx.persona] || PERSONAS.couple;
+  const w = PERSONAS[ctx.persona] || PERSONAS.couple;
   const pax = Math.max(1, (ctx.adults || 1) + (ctx.children || 0));
 
-  // de-duplicate the same flight sold by several sites: keep the cheapest
+  // the same flight sold by several sites: keep the cheapest
   const seen = new Map();
   for (const it of items) {
     if (!it || !it.price || !it.departure_at) continue;
@@ -53,104 +69,86 @@ export function rankFares(items, ctx) {
     if (!seen.has(k) || seen.get(k).price > it.price) seen.set(k, it);
   }
   let list = [...seen.values()];
-
-  if (ctx.nights && !ctx.oneWay && !ctx.returnWindow) {
-    const fit = list.filter((it) => it.return_at && Math.abs(nightsBetween(it.departure_at, it.return_at) - ctx.nights) <= 2);
-    if (fit.length) list = fit;
-  } else if (ctx.stayRange && !ctx.oneWay && !ctx.returnWindow) {
-    const [lo, hi] = ctx.stayRange;
+  // trip length the traveller asked for (if any)
+  if (!ctx.oneWay && !ctx.returnWindow && (ctx.nights || ctx.stayRange)) {
+    const [lo, hi] = ctx.nights ? [ctx.nights - 2, ctx.nights + 2] : ctx.stayRange;
     const fit = list.filter((it) => it.return_at && nightsBetween(it.departure_at, it.return_at) >= lo && nightsBetween(it.departure_at, it.return_at) <= hi);
     if (fit.length) list = fit;
   }
   if (!list.length) return [];
 
-  const minPrice = Math.min(...list.map((i) => i.price));
-  const durOf = (i) => i.duration_to || i.duration || 0;
-  const minDur = Math.min(...list.map(durOf).filter(Boolean)) || 1;
   const perPersonBudget = ctx.budget && ctx.budget.currency === ctx.currency
     ? (ctx.budget.perPerson ? ctx.budget.amount : ctx.budget.amount / pax) : null;
+  const minPrice = Math.min(...list.map((it) => it.price));
+  const timed = list.filter((it) => travelTime(it) > 0);
+  const minTime = timed.length ? Math.min(...timed.map(travelTime)) : 0;
 
   const scored = list.map((it) => {
-    const stops = (it.transfers || 0) + (it.return_transfers || 0);
     const dep = localParts(it.departure_at);
-    const arr = arrivalLocal(it.departure_at, it.duration_to, ctx.destTz);
-    const late = arr ? (arr.hour >= LATE_FROM || arr.hour < LATE_TO) : false;
-    const early = dep.hour < EARLY_DEP;
-    const overBudget = perPersonBudget ? it.price > perPersonBudget : false;
-    const score = (it.price / minPrice - 1) * p.price
-      + stops * p.stops
-      + (durOf(it) ? (durOf(it) / minDur - 1) * p.duration : 0)
-      + (late ? p.lateArrival * (ctx.avoidNight ? 2 : 1) : 0)
-      + (early ? p.earlyDeparture * (ctx.avoidNight ? 2 : 1) : 0)
-      + ((it.transfers || 0) > p.maxStops ? 1.5 : 0)
-      + (overBudget ? 0.5 : 0);
-    return { it, score, stops, dep, arr, late, early, overBudget, pax, perPersonBudget };
+    const arr = it.timeless ? null : arrivalLocal(it.departure_at, it.duration_to, ctx.destTz);
+    const late = !!arr && (arr.hour >= 23 || arr.hour < 5);
+    const t = travelTime(it);
+    const timePart = minTime && t ? t / minTime : 1.5; // unknown time: assume a bit slow
+    const score = w.price * (it.price / minPrice) + w.time * timePart - w.quality * quality(it.airline) + (late ? w.night : 0);
+    return { it, score, dep, arr, late, early: !it.timeless && dep.hour < 6, time: t, pax, perPersonBudget,
+      overBudget: perPersonBudget ? it.price > perPersonBudget : false, stops: (it.transfers || 0) + (it.return_transfers || 0) };
   });
-  for (const s of scored) s.comfort = comfortScore(s, minPrice, minDur);
 
-  const byScore = [...scored].sort((a, b) => a.score - b.score);
-  const best = byScore[0];
+  const best = scored.reduce((a, b) => (b.score < a.score ? b : a));
   const cheapest = scored.reduce((a, b) => (b.it.price < a.it.price || (b.it.price === a.it.price && b.score < a.score) ? b : a));
-  const comfy = scored.reduce((a, b) => (b.comfort < a.comfort || (b.comfort === a.comfort && b.it.price < a.it.price) ? b : a));
-  // fastest = least time travelling (both ways for a return), then the lower price
-  const travel = (s) => (s.it.return_at && s.it.duration ? s.it.duration : durOf(s.it)) || 1e9;
-  const fastest = scored.reduce((a, b) => (travel(b) < travel(a) || (travel(b) === travel(a) && b.it.price < a.it.price) ? b : a));
+  const withTime = scored.filter((s) => s.time > 0);
+  const fastest = withTime.length ? withTime.reduce((a, b) => (b.time < a.time || (b.time === a.time && b.it.price < a.it.price) ? b : a)) : null;
 
-  // One card per distinct flight; a flight can win more than one title.
+  // one card per flight; a flight can earn more than one title
   const picks = [];
   const add = (s, label) => {
-    const existing = picks.find((x) => x.s === s);
-    if (existing) existing.labels.push(label);
-    else picks.push({ s, labels: [label] });
+    const have = picks.find((x) => x.s === s);
+    if (have) have.labels.push(label); else picks.push({ s, labels: [label] });
   };
-  // Titles only mean something when there's a real choice: one fare is just "the fare seen";
-  // "Most comfortable" needs at least 3 to compare.
   const n = scored.length;
-  if (n === 1) add(best, 'Fare seen');
+  if (n === 1) add(best, 'Fare seen'); // one fare: no superlatives
   else {
     add(best, 'Best overall');
     add(cheapest, 'Cheapest');
-    if (travel(fastest) < 1e9 && travel(fastest) < travel(cheapest)) add(fastest, 'Fastest');
-    if (n >= 3) add(comfy, 'Most comfortable');
+    if (fastest && fastest.time < cheapest.time) add(fastest, 'Fastest');
   }
-  // "Also good": real alternatives, not the same flight on another date.
-  // Pass 1: a different airline · pass 2: a different flight · pass 3: anything left.
-  const flightSig = (x) => `${x.it.airline}|${x.it.flight_number}`;
-  const passes = [
-    (s) => !picks.some((x) => x.s.it.airline === s.it.airline),
-    (s) => !picks.some((x) => flightSig(x.s) === flightSig(s)),
-    () => true,
-  ];
-  for (const ok of passes) {
-    for (const s of byScore) {
-      if (picks.length >= 3) break;
-      if (!picks.some((x) => x.s === s) && ok(s)) picks.push({ s, labels: ['Also good'] });
-    }
+  // fill up to 3 with the next best-balanced flights on other airlines
+  for (const s of [...scored].sort((a, b) => a.score - b.score)) {
+    if (picks.length >= 3) break;
+    if (!picks.some((x) => x.s === s || x.s.it.airline === s.it.airline)) picks.push({ s, labels: ['Also good'] });
   }
   return picks.map(({ s, labels }, i) => ({
     ...s, rank: i + 1, labels, poolSize: n, isCheapest: s === cheapest && n > 1,
-    reasons: reasonsFor(s, ctx, p, s === cheapest && n > 1, s === fastest && n > 1 ? travel(s) : 0),
+    reasons: reasonsFor(s, { labels, cheapest, n }),
   }));
 }
 
-function reasonsFor(s, ctx, p, isCheapest, fastestMin = 0) {
+// Short, human reasons: why this one, and what to watch out for.
+function reasonsFor(s, { labels, cheapest, n }) {
   const why = [];
   const warn = [];
-  if (isCheapest) why.push('cheapest found');
-  if (fastestMin) why.push(`least time travelling (${Math.floor(fastestMin / 60)}h ${String(fastestMin % 60).padStart(2, '0')}m${s.it.return_at ? ' both ways' : ''})`);
-  if (s.it.transfers === 0) why.push('direct');
-  if (s.arr && !s.late && s.arr.hour >= 7 && s.arr.hour < 21) why.push('daytime arrival');
+  const q = quality(s.it.airline);
+  const r = RATINGS[s.it.airline];
+  if (labels.includes('Cheapest') && n > 1) why.push('lowest price');
+  if (labels.includes('Fastest') && s.time) why.push(`least time travelling (${hm(s.time)}${s.it.return_at ? ' both ways' : ''})`);
+  if (q >= 0.4 && r) why.push('well rated by passengers');
+  if (!labels.includes('Cheapest') && cheapest && s !== cheapest) {
+    const more = Math.round(((s.it.price - cheapest.it.price) / cheapest.it.price) * 100);
+    const quicker = cheapest.time && s.time ? cheapest.time - s.time : 0;
+    const gap = more >= 100 ? `${(s.it.price / cheapest.it.price).toFixed(1)}× the cheapest price` : `${more}% more than the cheapest`;
+    why.push(`${gap}${quicker >= 60 ? `, ${hm(quicker)} less travelling` : ''}`);
+  }
+  if (s.it.transfers === 0 && (!s.it.return_at || !s.it.return_transfers)) why.push('non-stop');
   if (s.perPersonBudget && !s.overBudget) why.push('within your budget');
-  if (s.late) warn.push(ctx.persona === 'family' || ctx.persona === 'women'
-    ? 'lands late at night; ranked lower for your group (consider a pre-booked transfer)'
-    : 'lands late at night; check transport from the airport');
+  why.splice(3); // keep it short: the three most useful reasons
+  if (BUDGET.has(s.it.airline)) warn.push('budget airline: check what baggage and meals are included');
+  if (s.it.stopover_wait >= 12 * 60) warn.push(`long waits at stopovers (about ${hm(s.it.stopover_wait)} in total)`);
+  if (s.late) warn.push('lands late at night: plan your airport transfer');
   if (s.early) warn.push('very early departure');
-  if ((s.it.transfers || 0) > p.maxStops) warn.push(`${s.it.transfers} stops`);
   if (s.overBudget) warn.push('above your budget');
   return { why, warn };
 }
 
-// Cheapest few departure dates in a month (for "Cheaper dates").
 export function cheapestDates(items, n = 5) {
   const byDate = new Map();
   for (const it of items) {

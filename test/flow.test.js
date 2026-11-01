@@ -128,13 +128,12 @@ test('journey: onboarding, uniqueness, search with three picks, weather, visa, e
   const t = res.body.text;
   console.log(`\n---- results ----\n${t}\n-----------------`);
   assert.match(t, /Here's what travellers found recently, Rahim/);
-  assert.match(t, /⭐ <b>Option 1 · Best overall · Fastest · Most comfortable · Thai Airways<\/b>/);
+  assert.match(t, /⭐ <b>Option 1 · Best overall · Fastest · Thai Airways<\/b>/);
   assert.match(t, /Dhaka ⇄ Bangkok<\/b> · return/);
   assert.match(t, /\d+ nights/);
   assert.match(t, /💰 <b>Option 2 · Cheapest · Malaysia Airlines<\/b>/);
   assert.match(t, /🛫 Thu, 10 Dec · 21:00 Dhaka → 02:00 \(\+1\) Bangkok/);
   assert.match(t, /1 stop \(about 45m connection, estimated\)/);
-  assert.match(t, /🛋️ <b>Most comfortable<\/b>|Most comfortable/);
   assert.match(t, /Bangkok in December: warm, dry, around 27°C on average/);
   assert.match(t, /thaievisa\.go\.th/);
   assert.match(t, /Thailand with your Bangladesh passport: e-visa \(apply online before you fly\)/);

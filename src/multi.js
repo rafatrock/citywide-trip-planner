@@ -10,7 +10,7 @@ import { countryName } from './countries.js';
 import { visaFor, countryVisaMap, yesCountries, needsEmbassy, VISA_TIPS } from './visa.js';
 import { send, btn, url, esc, logoLink, logoPreview } from './tg.js';
 import { addDays } from './parse.js';
-import { PERSONAS, localParts, arrivalLocal } from './rank.js';
+import { PERSONAS, localParts, arrivalLocal, quality } from './rank.js';
 import { money } from './format.js';
 
 const list = (s) => String(s || '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -128,7 +128,14 @@ async function legCandidates(env, leg, currency, spread) {
   let res = await Promise.all(months.map((m) => searchFares(env, { origin: leg.from, destination: leg.to, depart: m, oneWay: true, currency })));
   // nothing in the main price index: ask the Data API's other indexes (cheap, direct, latest prices),
   // unless live prices are set up (they're better, and come next)
-  if (!res.some((r) => r.items.length) && !liveReady(env)) res = await Promise.all(months.map((m) => moreFares(env, { origin: leg.from, destination: leg.to, month: m, oneWay: true, currency })));
+  let anyRef = null;
+  if (!res.some((r) => r.items.length) && !liveReady(env)) {
+    // plus one quick call for a guide price on any date, asked alongside (so it's never cut off later)
+    [anyRef, res] = await Promise.all([
+      searchFares(env, { origin: leg.from, destination: leg.to, depart: null, oneWay: true, currency, quick: true }),
+      Promise.all(months.map((m) => moreFares(env, { origin: leg.from, destination: leg.to, month: m, oneWay: true, currency }))),
+    ]);
+  }
   const first = res.find((r) => r.items.length);
   const cur = first?.currency || currency;
   const seen = new Set();
@@ -138,12 +145,16 @@ async function legCandidates(env, leg, currency, spread) {
     seen.add(k);
     return it.price > 0 && it.departure_at;
   });
-  return { items, cur };
+  return { items, cur, anyRef };
 }
 
 // A leg with no prices near the dates: a fair estimate, clearly labelled.
 // 1) the cheapest seen on any day for this leg; 2) the same route in the other direction.
-async function legEstimate(env, leg, currency) {
+async function legEstimate(env, leg, currency, anyRef = null) {
+  if (anyRef?.items?.length) {
+    const it = anyRef.items.reduce((a, b) => (b.price < a.price ? b : a));
+    return { price: it.price, cur: anyRef.currency, how: `lowest seen for ${day(it.departure_at)}` };
+  }
   // same month first (closest to the real price), then any day
   const [month, any] = await Promise.all([
     moreFares(env, { origin: leg.from, destination: leg.to, month: leg.date.slice(0, 7), oneWay: true, currency }),
@@ -226,8 +237,9 @@ export function threeItineraries(legs, cands0, opts, persona) {
   const minD = cands.map((c) => (c.items.length ? Math.min(...c.items.map((x) => x.duration_to || x.duration || 1e4)) : 1));
   const cheap = bestItinerary(legs, cands, opts, (v, i) => (v ? v.it.price : 0));
   const fast = bestItinerary(legs, cands, opts, (v, i) => (v ? v.dur * 1000 + v.it.price / 1e6 : 0));
-  const best = bestItinerary(legs, cands, opts, (v, i) => (v ? (v.it.price / minP[i]) * w.price + (v.dur / minD[i]) * w.duration
-    + v.stops * w.stops + (v.late ? w.lateArrival : 0) + (v.early ? w.earlyDeparture : 0) : 0));
+  // the same simple rule as single trips: price ÷ cheapest + time ÷ fastest − airline quality
+  const best = bestItinerary(legs, cands, opts, (v, i) => (v ? w.price * (v.it.price / minP[i]) + w.time * (v.dur ? v.dur / minD[i] : 1.5)
+    - w.quality * quality(v.it.airline) + (v.late ? w.night : 0) : 0));
   return { best, cheap, fast };
 }
 
@@ -283,7 +295,7 @@ export async function runMulti(env, user, chat, d, h) {
   const missing = best.picks.map((p, i) => (p.view ? null : i)).filter((i) => i !== null);
   const est = {};
   await Promise.all(missing.map(async (i) => {
-    const e = await legEstimate(env, legs[i], currency);
+    const e = await legEstimate(env, legs[i], currency, cands[i]?.anyRef);
     if (e && e.cur === cur) est[i] = e;
   }));
   const estTotal = Object.values(est).reduce((s, e) => s + e.price, 0);

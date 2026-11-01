@@ -1,10 +1,24 @@
-# CityWide Trip Planner — Telegram bot (version 4.9.7)
+# CityWide Trip Planner — Telegram bot (version 4.9.9)
 
-Travellers chat with **Maya**, a friendly AI travel assistant (she always says she's an AI if asked). They type a trip in one line; Maya replies with three picks for their group: ⭐ best overall, 💰 cheapest and 🛋️ most comfortable, plus weather and visa notes for their passport, and can watch prices.
+Travellers chat with **Maya**, a friendly AI travel assistant (she always says she's an AI if asked). They type a trip in one line; Maya replies with three picks for their group: ⭐ best overall, 💰 cheapest and ⚡ fastest, plus weather and visa notes for their passport, and can watch prices.
 
 Runs free on Cloudflare (Workers, D1, Workers AI) and earns through your Travelpayouts account.
 
 **Setup:** follow the step-by-step **CityWide Trip Planner — Setup Guide** doc. No commands, nothing to install: only Telegram, GitHub's website and the Cloudflare dashboard.
+
+## What's new in version 4.9.9 (fresh data, one simple rule)
+
+- **One simple rule, like a human:** 💰 Cheapest = lowest price. ⚡ Fastest = least time travelling. ⭐ Best overall = price ÷ cheapest price + time ÷ fastest time − airline quality (lowest wins). The traveller type only changes how much each part counts.
+- **Airline quality from Skytrax passenger reviews** (`src/airline-ratings.js`, 103 airlines, reviews since 2022). Reviewers are harsh, so each airline is compared with the average (3.4 / 10): Qatar 6.3 counts strongly in its favour; airlines with few reviews are pulled towards the average. Budget airlines with no reviews (Air Arabia, IndiGo…) count slightly below average. To refresh: run `tools/build-airline-ratings.py` on a new Skytrax export.
+- **Fresh data, nothing stored:** every search asks Aviasales again (no price cache). Up to 4 markets × 200 fares each, plus non-stop flights asked separately, whole months fetched once and narrowed to your dates in code. Optional `TP_CACHE_MINUTES` (default 0) brings caching back; `TP_CALLS_PER_DAY` (default 20000) replaces `TP_DAILY_MAX`.
+- **Real travel times (checked against the live API):** Aviasales' `duration` is the whole journey with stopovers; `duration_to`/`duration_back` are time in the air only. Maya used to show flying time (e.g. IndiGo "10h 50m") for a 30-hour trip. Now every card shows the real total ("⏱ 48h 35m travelling in total, incl. about 27h 45m waiting at stopovers"), per-way times and arrival times only when they are really known, and warns about long stopovers. Bigger price gaps read "3.9× the cheapest price".
+- **Honest labels:** one fare is shown as "Fare seen", not "best/cheapest/fastest"; "Fastest" appears only when it really is faster than the cheapest.
+
+## What's new in version 4.9.8
+
+- **Picks like a seasoned traveller:** Maya now knows airline quality. Top full-service airlines (Qatar, Emirates, Singapore, Turkish, Etihad…) count in their favour; budget airlines (Air Arabia, IndiGo, AirAsia, flydubai…) count a little against "best overall" (bags, meals, long stopovers) and get a "check baggage" note. Families and business trips weigh quality more; backpackers barely at all. E.g. Dhaka ⇄ Istanbul: ⭐ Qatar (best balance), 💰 Air Arabia (cheapest), ⚡ Turkish (fastest, non-stop).
+- **Reasons people understand:** "top-rated full-service airline, 46% more than the cheapest, 5h 35m quicker each way"; "lowest price"; "budget airline: check what baggage and meals are included".
+- **More airlines found:** up to 4 markets asked at once (incl. the Gulf market, where Qatar/Emirates/Air Arabia fares from South Asia are found) and 100 fares per market instead of 30.
 
 ## What's new in version 4.9.7
 

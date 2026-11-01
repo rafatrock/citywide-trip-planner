@@ -23,9 +23,13 @@ function api({ onlyOne = false } = {}) {
     const p = u.searchParams;
     let data = [];
     if (u.pathname.includes('prices_for_dates') && p.get('one_way') === 'false' && p.get('departure_at')) {
-      if (p.get('direct') === 'true') data = onlyOne ? [] : [f('TK', '2026-11-21T07:25:00', '2026-11-28T19:30:00', 191000, 0, 530)];
+      // as on Google Flights for 21-28 Nov (BDT per person), spread over different markets like the real cache
+      if (p.get('direct') === 'true') data = onlyOne ? [] : [f('TK', '2026-11-21T07:25:00', '2026-11-28T19:30:00', 429026, 0, 530)];
       else if (!p.get('market')) data = [f('6E', '2026-11-21T15:20:00', '2026-11-28T14:55:00', 80111, 1, 650)];
-      else if (p.get('market') === 'tr' && !onlyOne) data = [f('G9', '2026-11-21T22:50:00', '2026-11-28T14:05:00', 68700, 1, 1050), f('QR', '2026-11-21T03:25:00', '2026-11-28T20:10:00', 105000, 1, 715)];
+      else if (p.get('market') === 'ae' && !onlyOne) data = [
+        f('G9', '2026-11-21T22:50:00', '2026-11-28T14:05:00', 72216, 1, 1050),
+        f('QR', '2026-11-21T03:25:00', '2026-11-28T20:10:00', 105591, 1, 715),
+        f('EK', '2026-11-21T09:55:00', '2026-11-28T15:10:00', 114801, 1, 695)];
     }
     return new Response(JSON.stringify({ success: true, data }));
   };
@@ -40,7 +44,7 @@ async function rafat(env, id) {
   return { U, C };
 }
 
-test('Istanbul: Air Arabia cheapest (Turkish market), Turkish Airlines direct as fastest, IndiGo too', async () => {
+test('Istanbul like a seasoned traveller: Qatar best overall, Air Arabia cheapest, Turkish fastest', async () => {
   const log = installFetch();
   const restore = api();
   const env = makeEnv({ ADMIN_IDS: '9500' });
@@ -50,9 +54,12 @@ test('Istanbul: Air Arabia cheapest (Turkish market), Turkish Airlines direct as
   restore();
   const m = lastSent(log);
   console.log(`\n---- card ----\n${m.body.text}\n--------------`);
+  assert.match(m.body.text, /Best overall[^\n]*Qatar Airways/);
   assert.match(m.body.text, /Cheapest[^\n]*Air Arabia/);
   assert.match(m.body.text, /Fastest[^\n]*Turkish Airlines/);
-  assert.match(m.body.text, /IndiGo/);
+  assert.match(m.body.text, /well rated by passengers/);
+  assert.match(m.body.text, /budget airline: check what baggage/);
+  assert.ok(env.DB && true);
   assert.equal(m.body.link_preview_options.is_disabled, true, 'no big logo banner');
   assert.ok(buttons(m).filter((b) => / · Book$/.test(b.text)).length >= 3, 'a Book button per option');
 });

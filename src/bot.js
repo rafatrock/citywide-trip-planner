@@ -613,103 +613,73 @@ async function checkSearchQuota(env, user, chat, isGroup) {
 }
 const monthOf = (iso) => iso.slice(0, 7);
 
-// Builds one or two API queries plus date windows for flexible searches.
+// Which months to ask for, and which dates to keep. We always ask for whole months (one request
+// covers the exact date, ± 3 days and the nearest dates), then narrow down in code: far fewer calls,
+// so there's budget to ask every market fresh, every time.
 export function fareQueries(draft, user) {
   const base = { origin: draft.origin, destination: draft.destination, oneWay: !!draft.oneWay, direct: !!draft.direct, currency: user.currency || 'usd' };
   const dep = draft.depart.value;
   if (draft.depart.type === 'month' || draft.flex === 'month') {
     const m = monthOf(dep);
     const ret = draft.oneWay ? undefined : (draft.ret && draft.flex !== 'month' ? monthOf(draft.ret.value) : m);
-    return { queries: [{ ...base, depart: m, ret }], windows: {} };
+    return { queries: [{ ...base, depart: m, ret }], windows: {}, wide: null };
   }
-  if (draft.flex === '3d') {
-    const from = addDays(dep, -3);
-    const to = addDays(dep, 3);
-    const months = [...new Set([monthOf(from), monthOf(to)])];
-    const windows = { departWindow: { from, to } };
-    let ret;
-    if (!draft.oneWay) {
-      if (draft.ret) {
-        windows.returnWindow = { from: addDays(draft.ret.value, -3), to: addDays(draft.ret.value, 3) };
-        ret = monthOf(draft.ret.value);
-      } else ret = monthOf(dep);
-    }
-    return { queries: months.map((m) => ({ ...base, depart: m, ret })), windows };
-  }
-  // exact
-  const ret = draft.oneWay ? undefined : (draft.ret ? draft.ret.value : monthOf(dep));
-  return { queries: [{ ...base, depart: dep, ret }], windows: {} };
+  const months = [...new Set([monthOf(addDays(dep, -3)), monthOf(dep), monthOf(addDays(dep, 3))])];
+  const retDate = draft.oneWay ? null : (draft.ret ? draft.ret.value : null);
+  const ret = draft.oneWay ? undefined : (retDate ? monthOf(retDate) : monthOf(dep));
+  const win = (d, n) => ({ from: addDays(d, -n), to: addDays(d, n) });
+  const n = draft.flex === '3d' ? 3 : 0;
+  const windows = { departWindow: win(dep, n), ...(retDate ? { returnWindow: win(retDate, n) } : {}) };
+  const wide = { departWindow: win(dep, 3), ...(retDate ? { returnWindow: win(retDate, 3) } : {}) };
+  return { queries: months.map((m) => ({ ...base, depart: m, ret })), windows, wide };
 }
 
-// Round-trip fares for the whole departure month (and the return month), from every price list,
-// sorted by how close their dates are to what was asked (within 10 days each way).
-async function nearestRoundTrips(env, draft, user) {
-  const cur = (user.currency || 'usd').toLowerCase();
+// Round trips closest to the asked dates (within 20 days in total), from fares already fetched.
+function nearestOf(items, draft) {
   const dep = draft.depart.value.length === 7 ? `${draft.depart.value}-15` : draft.depart.value;
   const ret = draft.ret?.value || addDays(dep, { short: 3, week: 6, long: 10 }[draft.stay] || draft.nights || 7);
-  const base = { origin: draft.origin, destination: draft.destination, oneWay: false, direct: !!draft.direct, currency: cur };
-  const [a, b] = await Promise.all([
-    searchFares(env, { ...base, depart: monthOf(dep), ret: monthOf(ret) }),
-    moreFares(env, { origin: draft.origin, destination: draft.destination, month: monthOf(dep), oneWay: false, currency: cur }),
-  ]);
-  const curOut = a.items.length ? a.currency : b.currency;
-  const pool = [...(a.currency === curOut ? a.items : []), ...(b.currency === curOut ? b.items : [])].filter((it) => it.return_at);
   const off = (it) => Math.abs(Date.parse(it.departure_at.slice(0, 10)) - Date.parse(dep)) / 86400000
     + Math.abs(Date.parse(it.return_at.slice(0, 10)) - Date.parse(ret)) / 86400000;
-  const items = pool.filter((it) => off(it) <= 20).sort((x, y) => off(x) - off(y) || x.price - y.price).slice(0, 25);
-  return { items, currency: curOut };
-}
-
-async function fetchQuery(env, q) {
-  let res = await searchFares(env, q);
-  // a whole-month round trip that returns next month (e.g. 25 Jan → 3 Feb)
-  if (!res.capped && !res.items.length && !q.oneWay && q.ret && q.ret.length === 7 && q.ret === monthOf(q.depart)) {
-    const [y, m] = q.ret.split('-').map(Number);
-    const next = new Date(Date.UTC(y, m, 1));
-    res = await searchFares(env, { ...q, ret: `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}` });
-  }
-  return res;
+  return items.filter((it) => it.return_at && off(it) <= 20).sort((x, y) => off(x) - off(y) || x.price - y.price).slice(0, 40);
 }
 
 export async function fetchRanked(env, draft, user) {
-  let { queries, windows } = fareQueries(draft, user);
-  // all at once: faster. Direct flights are asked separately too: in a cheapest-first list they get
-  // pushed out by cheaper connections, and they're what time-pressed travellers want.
-  let results = await Promise.all([
-    ...queries.map((q) => fetchQuery(env, q)),
+  const { queries, windows, wide } = fareQueries(draft, user);
+  // every month and every market at once, plus direct flights asked separately (in a cheapest-first
+  // list they get pushed out by cheaper connections)
+  const results = await Promise.all([
+    ...queries.map((q) => searchFares(env, q)),
     ...(draft.direct ? [] : queries.map((q) => searchFares(env, { ...q, direct: true, quick: true }))),
   ]);
-  let nearby = false;
-  // exact dates with no recent price: look ± 3 days and say so, rather than "nothing found"
-  if (draft.flex === 'exact' && draft.depart.type === 'date' && !results.some((r) => r.items.length || r.capped)) {
-    ({ queries, windows } = fareQueries({ ...draft, flex: '3d' }, user));
-    results = await Promise.all(queries.map((q) => fetchQuery(env, q)));
-    nearby = results.some((r) => r.items.length);
-  }
-  // still nothing for a round trip: look at the whole month(s) of real round-trip fares (all price
-  // lists), and keep the ones closest to the asked dates. Real return tickets, each with its own link,
-  // beat adding up two unrelated one-way prices.
-  if (!draft.oneWay && !results.some((r) => r.items.length || r.capped)) {
-    const near = await nearestRoundTrips(env, draft, user);
-    if (near.items.length) { results = [near]; windows = {}; nearby = true; }
-  }
   let items = [];
   let currency = (user.currency || 'usd').toLowerCase();
   let capped = false;
   for (const res of results) {
     if (res.capped) capped = true;
-    if (res.items.length) {
-      if (items.length && res.currency !== currency) continue; // keep one currency per answer
-      currency = res.currency;
-      items = items.concat(res.items);
-    }
+    if (!res.items.length) continue;
+    if (items.length && res.currency !== currency) continue; // one currency per answer
+    currency = res.currency;
+    items = items.concat(res.items);
   }
   const dest = placeByCode(draft.destination);
-  const ranked = items.length ? rankFares(items, {
+  const rank = (list, w) => (list.length ? rankFares(list, {
     persona: draft.persona, adults: draft.adults, children: draft.children, budget: draft.budget,
-    currency, destTz: dest?.tz, avoidNight: draft.avoidNight, nights: draft.nights, oneWay: draft.oneWay, ...windows,
+    currency, destTz: dest?.tz, nights: draft.nights, oneWay: draft.oneWay, ...w,
     stayRange: !draft.oneWay && !draft.nights && STAYS[draft.stay] ? STAYS[draft.stay].slice(0, 2) : null,
-  }) : [];
+  }) : []);
+  let ranked = rank(items, windows);
+  let nearby = false;
+  // nothing on the exact dates: ± 3 days (same data, no new calls)
+  if (!ranked.length && wide && draft.flex === 'exact') { ranked = rank(items, wide); nearby = ranked.length > 0; }
+  // still nothing for a return trip: the closest real return fares this month, then the other price lists
+  if (!ranked.length && !draft.oneWay) {
+    let near = nearestOf(items, draft);
+    if (!near.length) {
+      const more = await moreFares(env, { origin: draft.origin, destination: draft.destination, month: monthOf(draft.depart.value), oneWay: false, currency });
+      if (more.currency === currency) near = nearestOf(more.items, draft);
+    }
+    if (near.length) { ranked = rank(near, {}); nearby = true; items = near; }
+  }
   return { res: { items, currency, capped, nearby }, ranked, q: queries[0] };
 }
 
@@ -810,12 +780,18 @@ function pickLines(r, cur, pax, i, d) {
     lines.push(`🛬 ${tgDate(it.return_at)} · ${hhmm(rd)} ${esc(placeName(d.destination))} → ${ret ? `${hhmm(ret)}${plusDay(rd.date, ret)} ` : ''}${esc(placeName(d.origin))}`);
     lines.push(`     ${stopsText(d.destination, d.origin, back, it.return_transfers ?? it.transfers)}${back ? ` · ${fmtDur(back)}` : ''} · ${n} night${n === 1 ? '' : 's'} in ${esc(dest?.name || '')}`);
   } else lines.push('     One way');
+  // the whole journey, always from Aviasales' own total (stopovers included)
+  if (it.duration && (it.return_at || it.transfers)) {
+    const wait = it.stopover_wait >= 60 ? `, incl. about ${fmtDur(it.stopover_wait)} waiting at stopovers` : '';
+    lines.push(`⏱ ${fmtDur(it.duration)} travelling in total${it.return_at ? ' (both ways)' : ''}${wait}`);
+  }
   if (r.reasons.why.length) lines.push(`✅ ${r.reasons.why.join(', ')}`);
   if (r.reasons.warn.length) lines.push(`⚠️ ${r.reasons.warn.join('; ')}`);
   return lines.join('\n');
 }
 const tgDate = (iso) => new Date(`${iso.slice(0, 10)}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).replace(/^(\w+) /, '$1, ');
-const backMinutes = (it) => it.duration_back || (it.duration && it.duration > (it.duration_to || 0) ? it.duration - (it.duration_to || 0) : 0);
+// door-to-door time of the way back (set by realTimes in tp.js; 0 = not known, so not shown)
+const backMinutes = (it) => it.duration_back || 0;
 
 async function formatResults(env, user, draft, ranked, cur, pax, stats, best, vmap = {}) {
   const who = (PERSONAS[draft.persona] || {}).label;

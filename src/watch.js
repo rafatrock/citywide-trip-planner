@@ -75,11 +75,14 @@ export async function stopWatch(env, user, chatId, id) {
 
 // Called by the 30-minute cron. Checks a small batch so each run stays light.
 export async function checkWatches(env) {
-  const batch = Number(env.WATCH_BATCH || 12);
+  // fresh prices take ~10 calls per watch and a run may make 50, so a few watches per run;
+  // the rest are checked on the next runs (every 30 minutes)
+  const batch = Math.min(Number(env.WATCH_BATCH || 12), 4);
   const { results } = await env.DB.prepare(`SELECT * FROM watches WHERE active = 1 AND last_checked < ? AND expires_at > ?
     ORDER BY last_checked ASC LIMIT ?`).bind(nowSec() - RECHECK_SEC, nowSec(), batch).all();
   let alerts = 0;
   for (const w of results || []) {
+    if (env.__sub && env.__sub.used > env.__sub.max - 16) break; // keep enough for this run's alerts
     const draft = JSON.parse(w.params);
     const owner = w.user_id > 0 ? await getUser(env, w.user_id) : null;
     if (owner?.banned) { await env.DB.prepare('UPDATE watches SET active = 0 WHERE id = ?').bind(w.id).run(); continue; }
