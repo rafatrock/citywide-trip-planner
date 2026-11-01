@@ -126,8 +126,9 @@ export function multiKeyboard(d) {
 async function legCandidates(env, leg, currency, spread) {
   const months = [...new Set([addDays(leg.date, -spread).slice(0, 7), leg.date.slice(0, 7), addDays(leg.date, spread).slice(0, 7)])];
   let res = await Promise.all(months.map((m) => searchFares(env, { origin: leg.from, destination: leg.to, depart: m, oneWay: true, currency })));
-  // nothing in the main price index: ask the Data API's other indexes (cheap, direct, latest prices)
-  if (!res.some((r) => r.items.length)) res = await Promise.all(months.map((m) => moreFares(env, { origin: leg.from, destination: leg.to, month: m, oneWay: true, currency })));
+  // nothing in the main price index: ask the Data API's other indexes (cheap, direct, latest prices),
+  // unless live prices are set up (they're better, and come next)
+  if (!res.some((r) => r.items.length) && !liveReady(env)) res = await Promise.all(months.map((m) => moreFares(env, { origin: leg.from, destination: leg.to, month: m, oneWay: true, currency })));
   const first = res.find((r) => r.items.length);
   const cur = first?.currency || currency;
   const seen = new Set();
@@ -146,14 +147,14 @@ async function legEstimate(env, leg, currency) {
   // same month first (closest to the real price), then any day
   const [month, any] = await Promise.all([
     moreFares(env, { origin: leg.from, destination: leg.to, month: leg.date.slice(0, 7), oneWay: true, currency }),
-    searchFares(env, { origin: leg.from, destination: leg.to, depart: null, oneWay: true, currency }),
+    searchFares(env, { origin: leg.from, destination: leg.to, depart: null, oneWay: true, currency, quick: true }),
   ]);
   for (const r of [month, any]) {
     if (!r.items.length) continue;
     const it = r.items.reduce((a, b) => (b.price < a.price ? b : a));
     return { price: it.price, cur: r.currency, how: `lowest seen for ${day(it.departure_at)}` };
   }
-  const back = await searchFares(env, { origin: leg.to, destination: leg.from, depart: leg.date.slice(0, 7), oneWay: true, currency });
+  const back = await searchFares(env, { origin: leg.to, destination: leg.from, depart: leg.date.slice(0, 7), oneWay: true, currency, quick: true });
   if (back.items.length) {
     const it = back.items.reduce((a, b) => (b.price < a.price ? b : a));
     return { price: it.price, cur: back.currency, how: 'based on the same route the other way' };
@@ -254,6 +255,10 @@ export async function runMulti(env, user, chat, d, h) {
   const minNights = Math.max(1, per - 1);
   const currency = user.currency || 'usd';
   // every leg's prices at the same time (much faster than one after another)
+  // a simple return trip: ask first (one call) for the cheapest real return fare on this route, any dates,
+  // so an honest guide is ready even if the rest of the call budget runs out
+  const simpleReturn = legs.length === 2 && legs[1].to === legs[0].from;
+  const rtAny = simpleReturn ? searchFares(env, { origin: legs[0].from, destination: legs[0].to, depart: null, oneWay: false, currency, quick: true }) : null;
   const cands = await Promise.all(legs.map((leg) => legCandidates(env, leg, currency, window + 3)));
   // LIVE prices (Google Flights) for flights the free data can't price near the planned day,
   // or for every flight when LIVE_MODE = "always". All legs are asked at the same time.
@@ -285,10 +290,10 @@ export async function runMulti(env, user, chat, d, h) {
   // A simple return trip with nothing real: the honest guide is a real RETURN fare seen on this route
   // (any dates), not a one-way price with the way back missing.
   let rtGuide = null;
-  const simpleReturn = legs.length === 2 && legs[1].to === legs[0].from && !best.picks.some((p) => p.view);
-  if (simpleReturn) {
-    const r = await searchFares(env, { origin: legs[0].from, destination: legs[0].to, depart: null, oneWay: false, currency });
-    if (r.items.length && r.currency === cur) rtGuide = r.items.filter((x) => x.return_at).reduce((a, b) => (b.price < a.price ? b : a), r.items[0]);
+  if (rtAny && !best.picks.some((p) => p.view)) {
+    const r = await rtAny;
+    const rts = r.items.filter((x) => x.return_at);
+    if (rts.length && r.currency === cur) rtGuide = rts.reduce((a, b) => (b.price < a.price ? b : a));
   }
   let nearbyTip = '';
   const firstMissing = missing.find((i) => !est[i]) ?? missing[0];
@@ -433,7 +438,5 @@ export async function runMulti(env, user, chat, d, h) {
     const g = await h.gearButton(env, user, d, best.picks[0]?.view?.it);
     if (g) kb.push([g]);
   }
-  // the top option's airline logo above the card (Aviasales logo service)
-  const lead = best.picks.find((p) => p.view && /^[A-Z0-9]{2}$/.test(p.view.it.airline || ''))?.view.it.airline;
-  return send(env, chat.id, logoLink(lead) + lines.join('\n'), kb, logoPreview(lead));
+  return send(env, chat.id, lines.join('\n'), kb);
 }

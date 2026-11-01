@@ -39,7 +39,7 @@ test('Dhaka → Sydney with no prices anywhere: under 50 outside calls, and a re
   console.log(`outside calls for the worst-case search: ${n}`);
   assert.ok(n <= 45, `${n} calls`);
   const m = lastSent(log).body.text;
-  assert.match(m, /Here's your trip|Here's what I found/);
+  assert.match(m, /Here's your trip|Here's what travellers found recently/);
 });
 
 test('3-country trip with no prices anywhere: still under the limit, and a reply arrives', async () => {

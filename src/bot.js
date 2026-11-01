@@ -59,7 +59,7 @@ export async function loadAirlineNames(env) {
   if (raw && raw !== MORE_RAW) { try { MORE_AIRLINES = JSON.parse(raw); MORE_RAW = raw; } catch { /* keep the old list */ } }
 }
 const airline = (c) => AIRLINES[c] || MORE_AIRLINES[c] || c || 'Airline';
-const LABEL_ICON = { 'Best overall': '⭐', Cheapest: '💰', Fastest: '⚡', 'Most comfortable': '🛋️', 'Also good': '👍' };
+const LABEL_ICON = { 'Best overall': '⭐', Cheapest: '💰', Fastest: '⚡', 'Most comfortable': '🛋️', 'Also good': '👍', 'Fare seen': '✈️' };
 
 const fmtDur = (min) => (min ? `${Math.floor(min / 60)}h ${String(min % 60).padStart(2, '0')}m` : '');
 const fmtDay = (iso) => new Date(`${iso.slice(0, 10)}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
@@ -673,7 +673,12 @@ async function fetchQuery(env, q) {
 
 export async function fetchRanked(env, draft, user) {
   let { queries, windows } = fareQueries(draft, user);
-  let results = await Promise.all(queries.map((q) => fetchQuery(env, q))); // all at once: faster
+  // all at once: faster. Direct flights are asked separately too: in a cheapest-first list they get
+  // pushed out by cheaper connections, and they're what time-pressed travellers want.
+  let results = await Promise.all([
+    ...queries.map((q) => fetchQuery(env, q)),
+    ...(draft.direct ? [] : queries.map((q) => searchFares(env, { ...q, direct: true, quick: true }))),
+  ]);
   let nearby = false;
   // exact dates with no recent price: look ± 3 days and say so, rather than "nothing found"
   if (draft.flex === 'exact' && draft.depart.type === 'date' && !results.some((r) => r.items.length || r.capped)) {
@@ -770,8 +775,7 @@ async function runSearch(env, user, chat, draft, isGroup) {
   if (extras[0]) keyboard.push([url(extras[0].text, extras[0].href)]); // one fitting extra (programs you've joined)
   if (gear) keyboard.push([gear]);
   const note = res.nearby ? `<i>No prices seen yet for your exact dates, so these are real return fares on the nearest dates travellers found. Tap 🔎 to check your exact dates live.</i>\n\n` : '';
-  const logo = /^[A-Z0-9]{2}$/.test(ranked[0].it.airline || '') ? ranked[0].it.airline : null;
-  return send(env, chat.id, logoLink(logo) + note + msg, keyboard, logoPreview(logo));
+  return send(env, chat.id, note + msg, keyboard);
 }
 
 // One option, carrier first, laid out like an e-ticket.
@@ -815,10 +819,12 @@ const backMinutes = (it) => it.duration_back || (it.duration && it.duration > (i
 
 async function formatResults(env, user, draft, ranked, cur, pax, stats, best, vmap = {}) {
   const who = (PERSONAS[draft.persona] || {}).label;
-  const out = [`Here's what I found, ${firstName(user)} 👇`, `<b>${esc(placeName(draft.origin))} ${draft.oneWay ? '→' : '⇄'} ${esc(placeName(draft.destination))}</b> · ${draft.oneWay ? 'one way' : 'return'}${who ? ` · for a ${esc(who.toLowerCase())}` : ''}`];
+  const out = [`Here's what travellers found recently, ${firstName(user)} 👇`, `<b>${esc(placeName(draft.origin))} ${draft.oneWay ? '→' : '⇄'} ${esc(placeName(draft.destination))}</b> · ${draft.oneWay ? 'one way' : 'return'}${who ? ` · for a ${esc(who.toLowerCase())}` : ''}`];
   if (stats && stats.n >= 3 && stats.low) {
     out.push(best <= stats.low ? '📉 Lowest price I have seen for this route this month.' : `Lowest I've seen recently: ${money(stats.low, cur)}.`);
   }
+  const pool = ranked[0].poolSize || ranked.length;
+  if (pool < 5) out.push(`<i>Only ${pool} fare${pool === 1 ? '' : 's'} seen by travellers recently for these dates. The live search usually shows more flights, often cheaper: tap 🔎 All live prices.</i>`);
   for (const [i, r] of ranked.entries()) out.push(pickLines(r, cur, pax, i, draft));
   out.push('');
   if (ranked[0].perPersonBudget && ranked.every((r) => r.overBudget)) {

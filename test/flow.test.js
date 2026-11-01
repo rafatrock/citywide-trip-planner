@@ -127,7 +127,7 @@ test('journey: onboarding, uniqueness, search with three picks, weather, visa, e
   const res = lastSent(log);
   const t = res.body.text;
   console.log(`\n---- results ----\n${t}\n-----------------`);
-  assert.match(t, /Here's what I found, Rahim/);
+  assert.match(t, /Here's what travellers found recently, Rahim/);
   assert.match(t, /⭐ <b>Option 1 · Best overall · Fastest · Most comfortable · Thai Airways<\/b>/);
   assert.match(t, /Dhaka ⇄ Bangkok<\/b> · return/);
   assert.match(t, /\d+ nights/);
@@ -304,7 +304,7 @@ test('journey: onboarding, uniqueness, search with three picks, weather, visa, e
   await post(env, groupMsg('anyone hungry?'));
   assert.equal(log.telegram.length, n);
   await post(env, groupMsg('@CityWideTripPlannerBot from Dhaka to Kuala Lumpur in December, 3 people'));
-  assert.match(lastText(log), /Here's what I found, Karim/);
+  assert.match(lastText(log), /Here's what travellers found recently, Karim/);
   assert.match(lastText(log), /Dhaka ⇄ Kuala Lumpur/);
 
   await post(env, privateMsg('/stats', { id: 999, first_name: 'Admin' }));

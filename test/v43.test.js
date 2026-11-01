@@ -131,7 +131,7 @@ test('AI understands replies to the open card (free model), and can use Claude w
   assert.match(seen.at(-1).user, /^Current trip: DAC → BKK, 2026-12/, 'the AI sees the open trip');
   assert.equal(seen.at(-1).model, '@cf/openai/gpt-oss-120b', 'the strongest Cloudflare model');
   await post(env, privateMsg('sounds good, show me prices', U));
-  assert.match(lastText(log), /Here's what I found|don't have recent prices/);
+  assert.match(lastText(log), /Here's what travellers found recently|don't have recent prices/);
   const n = env.DB.raw.prepare("SELECT SUM(value) AS v FROM counters WHERE name = 'ai_neurons'").get().v;
   assert.ok(n > 0 && n < 100, `Neurons counted: ${n}`);
 

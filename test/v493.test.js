@@ -29,7 +29,7 @@ test('"No visa yet" shows the flights straight away, and the answer can be chang
 
   await post(env, tap('d:visa:no:TH', U, C));
   const res = lastSent(log);
-  assert.match(res.body.text, /Here's what I found/, 'flights shown right after answering');
+  assert.match(res.body.text, /Here's what travellers found recently/, 'flights shown right after answering');
   assert.match(res.body.text, /Thailand with your Bangladesh passport: e-visa/, 'visa info, not a block');
 
   // the next card for Thailand still has the visa row, with the answer ticked, and it can be changed

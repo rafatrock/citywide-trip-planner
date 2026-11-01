@@ -103,10 +103,16 @@ export function rankFares(items, ctx) {
     if (existing) existing.labels.push(label);
     else picks.push({ s, labels: [label] });
   };
-  add(best, 'Best overall');
-  add(cheapest, 'Cheapest');
-  if (travel(fastest) < 1e9) add(fastest, 'Fastest');
-  add(comfy, 'Most comfortable');
+  // Titles only mean something when there's a real choice: one fare is just "the fare seen";
+  // "Most comfortable" needs at least 3 to compare.
+  const n = scored.length;
+  if (n === 1) add(best, 'Fare seen');
+  else {
+    add(best, 'Best overall');
+    add(cheapest, 'Cheapest');
+    if (travel(fastest) < 1e9 && travel(fastest) < travel(cheapest)) add(fastest, 'Fastest');
+    if (n >= 3) add(comfy, 'Most comfortable');
+  }
   // "Also good": real alternatives, not the same flight on another date.
   // Pass 1: a different airline · pass 2: a different flight · pass 3: anything left.
   const flightSig = (x) => `${x.it.airline}|${x.it.flight_number}`;
@@ -122,7 +128,8 @@ export function rankFares(items, ctx) {
     }
   }
   return picks.map(({ s, labels }, i) => ({
-    ...s, rank: i + 1, labels, isCheapest: s === cheapest, reasons: reasonsFor(s, ctx, p, s === cheapest, s === fastest ? travel(s) : 0),
+    ...s, rank: i + 1, labels, poolSize: n, isCheapest: s === cheapest && n > 1,
+    reasons: reasonsFor(s, ctx, p, s === cheapest && n > 1, s === fastest && n > 1 ? travel(s) : 0),
   }));
 }
 

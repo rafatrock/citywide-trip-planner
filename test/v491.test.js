@@ -42,7 +42,7 @@ async function rafat(env) {
   return { U, C };
 }
 
-test('Dhaka ⇄ London: real return fares on the nearest dates, each with its own ticket link and the airline logo', async () => {
+test('Dhaka ⇄ London: real return fares on the nearest dates, each with its own ticket link', async () => {
   const log = installFetch();
   const restore = api(true);
   const env = makeEnv({ ADMIN_IDS: '9200' });
@@ -57,8 +57,7 @@ test('Dhaka ⇄ London: real return fares on the nearest dates, each with its ow
   assert.match(m.body.text, /Cheapest/);
   assert.match(m.body.text, /Fastest/);
   assert.doesNotMatch(m.body.text, /Ryanair|guide only|PRICE GUIDE/);
-  assert.equal(m.body.link_preview_options.url, 'https://pics.avs.io/120/120/G9.png', 'logo of the top pick');
-  assert.equal(m.body.link_preview_options.show_above_text, true);
+  assert.equal(m.body.link_preview_options.is_disabled, true, 'no big logo banner');
   const book = buttons(m).find((b) => /Book/.test(b.text));
   const target = env.DB.raw.prepare('SELECT url FROM links WHERE id = ?').get(book.url.split('/go/')[1]).url;
   assert.match(target, /\?t=/, 'opens that exact ticket on Aviasales, so the card matches what they see');

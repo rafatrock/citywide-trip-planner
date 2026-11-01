@@ -85,9 +85,11 @@ export async function searchFares(env, q) {
   const wave1 = [{ currency: cur, market: null }, { currency: cur, market: region || fallbacks[0] || 'us' }];
   const used = new Set(wave1.map((a) => a.market));
   const wave2 = [...new Set([...(region ? [fallbacks[0]] : []), ...fallbacks.slice(region ? 0 : 1), ...(region ? REGION_EXTRA[region] || [] : [])])]
-    .filter((m) => m && !used.has(m)).slice(0, 2).map((m) => ({ currency: cur, market: m }));
+    .filter((m) => m && !used.has(m)).slice(0, 1).map((m) => ({ currency: cur, market: m }));
 
-  for (const wave of [wave1, wave2]) {
+  // quick = one call only (side checks like "any direct flights?" or a price guide)
+  const waves = q.quick ? [wave1.slice(0, 1)] : [wave1, wave2];
+  for (const wave of waves) {
     if (!wave.length) continue;
     const results = await Promise.all(wave.map((a) => {
       const params = { ...base, currency: a.currency };
@@ -95,8 +97,12 @@ export async function searchFares(env, q) {
       return callApi(env, params);
     }));
     if (results.some((r) => r.capped)) return { capped: true, items: [] };
-    for (const [i, r] of results.entries()) {
-      if (r.data.length) return { items: r.data, currency: (r.currency || wave[i].currency).toLowerCase(), market: wave[i].market || 'default' };
+    // keep the fares from every market that answered (each market's travellers find different flights)
+    const hit = results.map((r, i) => ({ r, i })).filter(({ r }) => Array.isArray(r.data) && r.data.length);
+    if (hit.length) {
+      const cur0 = (hit[0].r.currency || wave[hit[0].i].currency).toLowerCase();
+      const items = hit.filter(({ r, i }) => (r.currency || wave[i].currency).toLowerCase() === cur0).flatMap(({ r }) => r.data);
+      return { items, currency: cur0, market: hit.map(({ i }) => wave[i].market || 'default').join('+') };
     }
     if (results.every((r) => r.budget)) return { items: [], currency: cur, budget: true };
   }
