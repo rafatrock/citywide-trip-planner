@@ -1,10 +1,15 @@
-# CityWide Trip Planner — Telegram bot (version 4.9.5)
+# CityWide Trip Planner — Telegram bot (version 4.9.6)
 
 Travellers chat with **Maya**, a friendly AI travel assistant (she always says she's an AI if asked). They type a trip in one line; Maya replies with three picks for their group: ⭐ best overall, 💰 cheapest and 🛋️ most comfortable, plus weather and visa notes for their passport, and can watch prices.
 
 Runs free on Cloudflare (Workers, D1, Workers AI) and earns through your Travelpayouts account.
 
 **Setup:** follow the step-by-step **CityWide Trip Planner — Setup Guide** doc. No commands, nothing to install: only Telegram, GitHub's website and the Cloudflare dashboard.
+
+## What's new in version 4.9.6 (taught from /misses)
+
+- "Me and my 5 friends", "me, and my 5 friends", "me plus 5 friends", "my 5 friends and me", "with my 5 friends" = 6 people (the speaker counts).
+- /misses only lists messages where Maya recognised nothing at all. A message with only people or dates ("1 adult only no children") isn't a miss: Maya keeps it and asks where to.
 
 ## What's new in version 4.9.5
 

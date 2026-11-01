@@ -74,3 +74,16 @@ test('typos are forgiven', () => {
   assert.equal(p('going to thailnd next month').destCountry, 'TH');
   assert.equal(p('cheap flights please').destination, undefined);
 });
+
+test('group size: the speaker counts ("me and my 5 friends" = 6)', () => {
+  const now = new Date('2026-11-01T10:00:00Z');
+  for (const t of ['Me,and my 5 friends', 'Me and my 5 friends', 'me & my 5 friends', 'me plus 5 friends', 'my 5 friends and me', 'with my 5 friends', 'me and my five friends']) {
+    assert.equal(parseTrip(t, { now, home: 'DAC' }).adults, 6, t);
+  }
+  assert.equal(parseTrip('5 friends trip to Goa', { now, home: 'DAC' }).adults, 5, 'no "me": the 5 are the group');
+  assert.equal(parseTrip('Me and 3 friends, Dhaka to Bangkok', { now, home: 'DAC' }).adults, 4);
+  const d = parseTrip('1 adult only no children.', { now, home: 'DAC' });
+  assert.equal(d.adults, 1);
+  assert.equal(d.children, 0);
+  assert.equal(d.persona, undefined);
+});

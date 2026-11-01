@@ -135,7 +135,13 @@ function parseTravellers(t) {
     const total = num(m[1].toLowerCase());
     if (!r.adults && !r.children) { r.adults = Math.min(2, total); r.children = Math.max(0, total - 2); }
   }
-  if ((m = t.match(new RegExp(`\\b(?:me|i|myself)\\s*(?:and|&|\\+|with)\\s*${N}\\s*(?:friends?|buddies|mates|colleagues|others|people|girls|guys)`, 'i')))) {
+  // "me and my 5 friends", "me, and my 5 friends", "me plus 5 friends", "my 5 friends and me", "with my 5 friends" = 6
+  const WHO = '(?:[a-z]+\\s+)?(?:friends?|buddies|mates|colleagues|cousins|others|people|girls|guys|ladies|boys|classmates|family members|relatives)';
+  if (!/\b(?:me|i|myself)\s*,?\s*(?:and|&|\+|plus|with)\s*(?:my|our)?\s*\d/i.test(t)
+    && ((m = t.match(new RegExp(`\\b(?:my|our)\\s+${N}\\s*${WHO}\\s*(?:and|&|\\+|plus)\\s*(?:me|i|myself)\\b`, 'i')))
+      || (m = t.match(new RegExp(`\\bwith\\s+(?:my|our)\\s+${N}\\s*${WHO}`, 'i'))))) {
+    r.adults = num(m[1].toLowerCase()) + 1;
+  } else if ((m = t.match(new RegExp(`\\b(?:me|i|myself)\\s*,?\\s*(?:and|&|\\+|plus|with)\\s*(?:my|our)?\\s*${N}\\s*${WHO}`, 'i')))) {
     r.adults = num(m[1].toLowerCase()) + 1;
   } else if ((m = t.match(new RegExp(`\\b(?:group of|we are|we're|total|party of)\\s*${N}\\b`, 'i')))) {
     r.adults = Math.max(1, num(m[1].toLowerCase()) - (r.children || 0));

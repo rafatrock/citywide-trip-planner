@@ -443,7 +443,10 @@ async function onTripText(env, user, chat, text, isGroup, preset = null) {
     if (!rulesHavePlace && ai.multi) delete draft.destCountry;
     if (!draft.origin) draft.origin = user.home;
   }
-  if (!draft.destination && !draft.destCountry && text.split(/\s+/).length >= 3) {
+  // "not understood" = nothing at all recognised (a message with only people or dates is fine:
+  // Maya keeps it and asks where to). These go to /misses for teaching Maya.
+  const understood = draft.multi || draft.adults || draft.children !== undefined || draft.depart || draft.budget || draft.nights || draft.persona || draft.oneWay;
+  if (!draft.destination && !draft.destCountry && !understood && text.split(/\s+/).length >= 3) {
     await env.DB.prepare('INSERT INTO misses (user_id, text, at) VALUES (?, ?, ?)').bind(user.id, text.slice(0, 200), nowSec()).run();
     await bump(env, 'parse_misses');
   }
